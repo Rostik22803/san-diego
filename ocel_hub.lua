@@ -458,10 +458,65 @@ local function update_aim_pre(dt)
 	end
 end
 
+local CAMGC = { Ctrl = nil, LastScan = 0, Applied = false, Sig = nil, SigCam = nil, Lock = false }
+local function find_cam_ctrl()
+	local now = os.clock()
+	if CAMGC.Ctrl or (now - CAMGC.LastScan) < 2.0 then return CAMGC.Ctrl end
+	if typeof(getgc) ~= "function" then return nil end
+	CAMGC.LastScan = now
+	pcall(function()
+		for _, obj in ipairs(getgc(true)) do
+			if typeof(obj) == "table" and typeof(rawget(obj, "SetFOVOverride")) == "function" and typeof(rawget(obj, "SetFOVMultiplier")) == "function" and typeof(rawget(obj, "GetBaseFOV")) == "function" then
+				CAMGC.Ctrl = obj
+				break
+			end
+		end
+	end)
+	return CAMGC.Ctrl
+end
+
+local function sync_world_fov(force_off)
+	local cam = Workspace.CurrentCamera
+	local on = (not force_off) and CFG.Camera.OverrideFOV
+	local ctrl_c = find_cam_ctrl()
+	if on then
+		CAMGC.Applied = true
+		if ctrl_c then pcall(function() ctrl_c:SetFOVOverride(CFG.Camera.FOV) end) end
+		if cam and not CAMGC.Lock then
+			CAMGC.Lock = true
+			if math.abs(cam.FieldOfView - CFG.Camera.FOV) > 0.05 then cam.FieldOfView = CFG.Camera.FOV end
+			if CAMGC.SigCam ~= cam then
+				if CAMGC.Sig then pcall(function() CAMGC.Sig:Disconnect() end); CAMGC.Sig = nil end
+				CAMGC.SigCam = cam
+				CAMGC.Sig = cam:GetPropertyChangedSignal("FieldOfView"):Connect(function()
+					if not S.Destroyed and CFG.Camera.OverrideFOV and not CAMGC.Lock and Workspace.CurrentCamera == cam then
+						if math.abs(cam.FieldOfView - CFG.Camera.FOV) > 0.05 then
+							CAMGC.Lock = true
+							cam.FieldOfView = CFG.Camera.FOV
+							CAMGC.Lock = false
+						end
+					end
+				end)
+			end
+			CAMGC.Lock = false
+		end
+	elseif CAMGC.Applied or force_off then
+		CAMGC.Applied = false
+		if ctrl_c then pcall(function() ctrl_c:SetFOVOverride(nil) end) end
+		if CAMGC.Sig then pcall(function() CAMGC.Sig:Disconnect() end); CAMGC.Sig = nil end
+		CAMGC.SigCam = nil
+		if cam and not CAMGC.Lock then
+			CAMGC.Lock = true
+			cam.FieldOfView = 70
+			CAMGC.Lock = false
+		end
+	end
+end
+
 local function update_aim_post()
 	local cam = Workspace.CurrentCamera
 	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible = false, false; hide_aim_visuals(); return end
-	if CFG.Camera.OverrideFOV then cam.FieldOfView = CFG.Camera.FOV end
+	sync_world_fov(false)
 	local ctr = aim_origin(cam)
 	local sf = CFG.Aim.Enabled and CFG.Aim.ShowFOV
 	AimD.FOVOut.Visible, AimD.FOV.Visible = sf and not CFG.Aim.FOVFilled, sf
@@ -766,10 +821,10 @@ local function del_npc_esp(mdl)
 	free_esp_entry(e)
 end
 
-local NPCGC = { Map = nil, Entities = nil, LastScan = 0 }
+local NPCGC = { Map = nil, Entities = nil, Ctrl = nil, LastScan = 0 }
 local function scan_npc_gc()
 	local now = os.clock()
-	if (NPCGC.Map and NPCGC.Entities) or (now - NPCGC.LastScan) < 2.0 then return end
+	if (NPCGC.Map and NPCGC.Entities and NPCGC.Ctrl) or (now - NPCGC.LastScan) < 2.0 then return end
 	if typeof(getgc) ~= "function" then return end
 	NPCGC.LastScan = now
 	pcall(function()
@@ -790,7 +845,12 @@ local function scan_npc_gc()
 						end
 					end
 				end
-				if NPCGC.Map and NPCGC.Entities then break end
+				if not NPCGC.Ctrl then
+					if typeof(rawget(obj, "GetEntityFromPart")) == "function" and typeof(rawget(obj, "GetEntity")) == "function" then
+						NPCGC.Ctrl = obj
+					end
+				end
+				if NPCGC.Map and NPCGC.Entities and NPCGC.Ctrl then break end
 			end
 		end
 	end)
@@ -814,14 +874,32 @@ local function npc_meta(part, mdl)
 				end
 			end
 		end
+		if (not aid or aid == 0) and NPCGC.Ctrl then
+			if part then
+				local ok, id = pcall(function() return NPCGC.Ctrl:GetEntityFromPart(part) end)
+				if ok and typeof(id) == "number" and id ~= 0 then aid = id end
+			end
+			if (not aid or aid == 0) and mdl then
+				for _, ch in ipairs(mdl:GetChildren()) do
+					if ch:IsA("BasePart") then
+						local ok, id = pcall(function() return NPCGC.Ctrl:GetEntityFromPart(ch) end)
+						if ok and typeof(id) == "number" and id ~= 0 then aid = id; break end
+					end
+				end
+			end
+		end
 	end
-	local arch
+	local ent, arch
 	if typeof(aid) == "number" and aid ~= 0 then
 		scan_npc_gc()
-		local ent = NPCGC.Entities and NPCGC.Entities[aid]
+		ent = NPCGC.Entities and NPCGC.Entities[aid]
+		if not ent and NPCGC.Ctrl then
+			local ok, r = pcall(function() return NPCGC.Ctrl:GetEntity(aid) end)
+			if ok then ent = r end
+		end
 		arch = typeof(ent) == "table" and ent.Archetype or nil
 	end
-	return (typeof(aid) == "number" and aid ~= 0) and aid or nil, arch
+	return (typeof(aid) == "number" and aid ~= 0) and aid or nil, arch, ent
 end
 
 local function npc_matches_filter(filter, is_border, is_jewelry)
@@ -836,7 +914,7 @@ local function npc_info(mdl, rt)
 	local nar = nt and nt:FindFirstChild("NameAndRank")
 	local plbl = nar and nar:FindFirstChild("PlayerName")
 	local rlbl = nar and nar:FindFirstChild("RankName")
-	local _, arch = npc_meta(rt, mdl)
+	local aid, arch, ent = npc_meta(rt, mdl)
 	local aname = typeof(arch) == "table" and arch.Name or ""
 	local adisp = typeof(arch) == "table" and arch.DisplayName or ""
 	local nm = (plbl and plbl:IsA("TextLabel") and plbl.Text ~= "") and plbl.Text or (adisp ~= "" and adisp or mdl.Name)
@@ -845,7 +923,7 @@ local function npc_info(mdl, rt)
 	local is_border = (aname == "CheckpointOfficer") or (rk:find("Checkpoint", 1, true) ~= nil) or (nm:find("Checkpoint", 1, true) ~= nil)
 	-- JewelleryGuard has Nametag = false in NPCArchetypes; fall back to missing Nametag before Replica populates
 	local is_jewelry = (aname == "JewelleryGuard") or (adisp == "Security Guard") or (not is_border and aname == "" and nt == nil)
-	return nm, rk, tc_col, is_border, is_jewelry, aname
+	return nm, rk, tc_col, is_border, is_jewelry, aname, aid, ent
 end
 
 local function npc_alive(mdl, hum, rt)
@@ -854,6 +932,10 @@ local function npc_alive(mdl, hum, rt)
 	if hum.Health <= 0 or hum:GetAttribute("Dead") == true or hum:GetState() == Enum.HumanoidStateType.Dead then return false end
 	local hd = mdl:FindFirstChild("Head")
 	if hd and hd:IsA("BasePart") and not rt.Anchored and not hd.CanQuery then return false end
+	local aid, _, ent = npc_meta(hd or rt, mdl)
+	-- Renderer.Kill removes parts from EntityOfPart while Humanoid.Health stays 100 on ragdoll corpses
+	if (NPCGC.Map or NPCGC.Ctrl) and not aid then return false end
+	if typeof(ent) == "table" and typeof(ent.Flags) == "number" and bit32 and bit32.btest(ent.Flags, 32) then return false end
 	return true
 end
 
@@ -1193,6 +1275,7 @@ local function patch_tryshoot_table(shots)
 								s.BulletImpactPosition = imp
 								s.Normal = nrm
 								s.TargetInstance = part
+								s.CraftPart, s.CraftImpact, s.CraftPartPosition = nil, nil, nil
 								if rtgt.IsNPC then
 									s.TargetCharacter = nil
 									s.NPCId = rtgt.NPCId
@@ -2350,9 +2433,12 @@ local function build_ui(destroy_fn)
 	hdr_lbl(mpg, "World Camera FOV")
 	tog(mpg, "Override World FOV", function() return CFG.Camera.OverrideFOV end, function(v)
 		CFG.Camera.OverrideFOV = v
-		if not v and Workspace.CurrentCamera then Workspace.CurrentCamera.FieldOfView = 70 end
+		sync_world_fov(not v)
 	end)
-	sld(mpg, "World FOV", 30, 120, 1, "deg", function() return CFG.Camera.FOV end, function(v) CFG.Camera.FOV = v end)
+	sld(mpg, "World FOV", 30, 120, 1, "deg", function() return CFG.Camera.FOV end, function(v)
+		CFG.Camera.FOV = v
+		if CFG.Camera.OverrideFOV then sync_world_fov(false) end
+	end)
 	hdr_lbl(mpg, "Mobile & Interface")
 	sld(mpg, "Menu Scale", 0.75, 1.30, 0.05, "x", function() return CFG.Menu.UIScale end, function(v) CFG.Menu.UIScale = v; upd_scale() end)
 	tog(mpg, "Show [OCEL] Toggle Pill", function() return CFG.Menu.ShowTogglePill end, function(v) CFG.Menu.ShowTogglePill = v; if UI.TPill then UI.TPill.Visible = v end end)
@@ -2381,7 +2467,7 @@ local function destroy_all()
 	cleanup_tracers()
 	cleanup_crosshair()
 	cleanup_chams()
-	if CFG.Camera.OverrideFOV and Workspace.CurrentCamera then pcall(function() Workspace.CurrentCamera.FieldOfView = 70 end) end
+	sync_world_fov(true)
 	if UI.Gui then pcall(function() UI.Gui:Destroy() end) end
 	if getgenv and getgenv().OcelHub == ctrl then getgenv().OcelHub = nil end
 end
@@ -2412,4 +2498,4 @@ install_silent_hooks()
 build_ui(destroy_all)
 RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
 RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
-tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk); update_silent(); update_tracers(clk) end end))
+tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then sync_world_fov(false); local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk); update_silent(); update_tracers(clk) end end))

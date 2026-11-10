@@ -325,13 +325,55 @@ local AimD = {
 local rp = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude; rp.IgnoreWater = true
 pcall(function() rp.CollisionGroup = "Bullet" end)
 
+local function is_pierceable_part(inst)
+	if not inst or not inst:IsA("BasePart") then return false end
+	local tool = inst:FindFirstAncestorWhichIsA("Tool")
+	if tool and tool.Name == "Riot Shield" then return false end
+	if inst.CollisionGroup == "DoorPathfinding" then return true end
+	if inst:GetAttribute("BulletsCanPierce") == true then return true end
+	if inst.Transparency >= 0.4 and (inst.CollisionGroup == "Default" or inst.CollisionGroup == "BoatHull") then
+		return true
+	end
+	if inst.Transparency >= 1 and not inst.CanCollide then
+		local gp = Workspace:FindFirstChild("Gameplay")
+		local bp = gp and gp:FindFirstChild("BeachHousePlots")
+		if bp and inst:IsDescendantOf(bp) then return true end
+	end
+	return false
+end
+
+local function bullet_raycast(orig, dir, base_filter, stop_mdl)
+	if dir.Magnitude < 0.05 then return nil end
+	local f = table.clone(base_filter)
+	for _ = 1, 5 do
+		rp.FilterDescendantsInstances = f
+		local res = Workspace:Raycast(orig, dir, rp)
+		if not res or not res.Instance then return nil end
+		local hit = res.Instance
+		if stop_mdl and hit:IsDescendantOf(stop_mdl) then return res end
+		if is_pierceable_part(hit) then
+			table.insert(f, hit)
+		else
+			return res
+		end
+	end
+	return nil
+end
+
 local function can_see(cam, orig, part, ch)
 	local dir = part.Position - orig
 	if dir.Magnitude < 0.05 then return true end
 	local f = {}; if LP.Character then table.insert(f, LP.Character) end; if cam then table.insert(f, cam) end
-	rp.FilterDescendantsInstances = f
-	local res = Workspace:Raycast(orig, dir, rp)
+	local res = bullet_raycast(orig, dir, f, ch)
 	return not res or (res.Instance and res.Instance:IsDescendantOf(ch))
+end
+
+local function can_see_pos(cam, orig, pos, ch)
+	local dir = pos - orig
+	if dir.Magnitude < 0.05 then return true end
+	local f = {}; if LP.Character then table.insert(f, LP.Character) end; if cam then table.insert(f, cam) end
+	local res = bullet_raycast(orig, dir, f, ch)
+	return not res or (ch and res.Instance and res.Instance:IsDescendantOf(ch))
 end
 
 local RND_PARTS = { "Head", "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso" }
@@ -1127,10 +1169,21 @@ local function obb_hit_on_part(origin, aim_pos, part)
 		end
 	end
 	if tmin > 0 and tmin < 1e8 then
-		return origin + ud * tmin, ax_v[hit_ax] * hit_s
+		return origin + ud * tmin, ax_v[hit_ax] * hit_s, true
 	end
 	local r = math.min(sz.X, sz.Y, sz.Z) * 0.85
-	return aim_pos - ud * math.min(r, dv.Magnitude * 0.5), -ud
+	return aim_pos - ud * math.min(r, dv.Magnitude * 0.5), -ud, false
+end
+
+local function safe_silent_aim_pos(cam, orig, part, hum, model)
+	local ap = resolve_silent_pos(orig, part, hum)
+	if (ap - part.Position).Magnitude > 0.05 then
+		local _, _, hit_obb = obb_hit_on_part(orig, ap, part)
+		if not hit_obb or (CFG.Silent.MagicBullet and not can_see_pos(cam, orig, ap, model)) then
+			return part.Position
+		end
+	end
+	return ap
 end
 
 local function collect_tgt_parts(ch)
@@ -1169,7 +1222,7 @@ local function find_silent_tgt(for_shot)
 			best_tgt = {
 				Model = mdl, Player = pl, Hum = hum, Part = part,
 				Parts = (not for_shot and sc.TargetPart == "Random") and collect_tgt_parts(mdl) or nil,
-				NPCId = (not for_shot and is_npc) and silent_npc_id(part, mdl) or nil,
+				NPCId = is_npc and silent_npc_id(part, mdl) or nil,
 				Fov = fd, Dist = wd, IsNPC = is_npc,
 			}
 		end
@@ -1249,7 +1302,8 @@ local in_dyncast_redirect = false
 local function patch_tryshoot_table(shots)
 	local sc = CFG.Silent
 	if typeof(shots) ~= "table" or #shots == 0 then return end
-	local tgt = S.SilentTgt
+	local pass_c, ptgt_c = sample_silent_shot(true)
+	local tgt = S.SilentTgt or (pass_c and ptgt_c or nil)
 	if not tgt or not tgt.Part or not tgt.Part.Parent then return end
 	for i = 1, #shots do
 		local s = shots[i]
@@ -1260,13 +1314,15 @@ local function patch_tryshoot_table(shots)
 					if pass and ptgt and ptgt.Part then
 						if sc.MagicBullet and ptgt.WallbangMuzzle then s.MuzzlePosition = ptgt.WallbangMuzzle end
 						local ap = resolve_silent_pos(s.MuzzlePosition, ptgt.Part, ptgt.Hum)
+						local _, _, hit_obb = obb_hit_on_part(s.MuzzlePosition, ap, ptgt.Part)
+						if not hit_obb then ap = ptgt.Part.Position end
 						local dv = ap - s.MuzzlePosition
 						if dv.Magnitude > 0.05 then s.Direction = dv.Unit end
 					end
 				end
 			elseif s.MuzzleDirectionUnit ~= nil then
 				local already_hit = (typeof(s.TargetInstance) == "Instance") and (s.TargetCharacter ~= nil or s.NPCId ~= nil)
-				if sc.Method == "Hybrid" and already_hit and typeof(s.BulletImpactPosition) == "Vector3" then
+				if (sc.Method == "Hybrid" or sc.Method == "Raycast") and already_hit and typeof(s.BulletImpactPosition) == "Vector3" then
 					if sc.MagicBullet and tgt.WallbangMuzzle then s.MuzzlePosition = tgt.WallbangMuzzle end
 					local dv = s.BulletImpactPosition - s.MuzzlePosition
 					if dv.Magnitude > 0.05 then s.MuzzleDirectionUnit = dv.Unit end
@@ -1280,10 +1336,14 @@ local function patch_tryshoot_table(shots)
 						if part and part.Parent then
 							if sc.MagicBullet and rtgt.WallbangMuzzle then s.MuzzlePosition = rtgt.WallbangMuzzle end
 							local ap = resolve_silent_pos(s.MuzzlePosition, part, rtgt.Hum)
+							local imp, nrm, hit_obb = obb_hit_on_part(s.MuzzlePosition, ap, part)
+							if not hit_obb then
+								ap = part.Position
+								imp, nrm = obb_hit_on_part(s.MuzzlePosition, ap, part)
+							end
 							local dv = ap - s.MuzzlePosition
 							if dv.Magnitude > 0.05 then
 								local ud = dv.Unit
-								local imp, nrm = obb_hit_on_part(s.MuzzlePosition, ap, part)
 								s.MuzzleDirectionUnit = ud
 								s.BulletImpactPosition = imp
 								s.Normal = nrm
@@ -1315,6 +1375,8 @@ local function sync_silent_slot()
 		g._OcelSilentSlot.Active = (not S.Destroyed and (CFG.Silent.Enabled or CFG.Tracers.Enabled))
 	end
 end
+
+local has_open_los, find_wallbang_muzzle, resolve_tgt_wallbang
 
 local function install_silent_hooks()
 	local g = getgenv and getgenv() or _G
@@ -1368,8 +1430,22 @@ local function install_silent_hooks()
 			if typeof(orig) == "Vector3" and typeof(vec) == "Vector3" and vec.Magnitude >= 15 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
 				local pass, tgt = sample_silent_shot(false)
 				if pass and tgt and tgt.Part then
-					if sc.MagicBullet and tgt.WallbangMuzzle then cast_orig = tgt.WallbangMuzzle end
-					local aim_p = resolve_silent_pos(cast_orig, tgt.Part, tgt.Hum)
+					local cam = Workspace.CurrentCamera
+					if sc.MagicBullet and cam then
+						if not tgt.WallbangChecked then resolve_tgt_wallbang(cam, tgt) end
+						if tgt.WallbangMuzzle then
+							cast_orig = tgt.WallbangMuzzle
+						elseif not has_open_los(cam, orig, tgt.Part, tgt.Model) then
+							local my_ch = LP and LP.Character
+							local my_hd = my_ch and (my_ch:FindFirstChild("Head") or my_ch:FindFirstChild("HumanoidRootPart"))
+							local hd_pos = (my_hd and my_hd:IsA("BasePart")) and my_hd.Position or cam.CFrame.Position
+							if has_open_los(cam, hd_pos, tgt.Part, tgt.Model) then
+								tgt.WallbangMuzzle = hd_pos
+								cast_orig = hd_pos
+							end
+						end
+					end
+					local aim_p = cam and safe_silent_aim_pos(cam, cast_orig, tgt.Part, tgt.Hum, tgt.Model) or resolve_silent_pos(cast_orig, tgt.Part, tgt.Hum)
 					local nv = aim_p - cast_orig
 					if nv.Magnitude > 0.05 then
 						out_vec = nv.Unit * vec.Magnitude
@@ -1508,38 +1584,41 @@ local function hide_silent_visuals()
 	SilentD.FOVOut.Visible, SilentD.FOV.Visible, SilentD.SnapOut.Visible, SilentD.Snap.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false, false, false
 end
 
-local function has_open_los(cam, orig, part, mdl)
+has_open_los = function(cam, orig, part, mdl)
 	if not can_see(cam, orig, part, mdl) then return false end
 	local back = orig - part.Position
 	if back.Magnitude < 0.05 then return true end
 	local f = {}; if LP.Character then table.insert(f, LP.Character) end
 	if cam then table.insert(f, cam) end
 	if mdl then table.insert(f, mdl) end
-	rp.FilterDescendantsInstances = f
-	-- Reverse ray rejects origins placed inside solid walls where forward raycast ignores backfaces
-	return Workspace:Raycast(part.Position, back, rp) == nil
+	-- Reverse bullet ray rejects origins placed inside solid walls while skipping pierceable glass/doors
+	return bullet_raycast(part.Position, back, f, nil) == nil
 end
 
 local wb_cache = { Part = nil, Base = nil, TgtPos = nil, Pos = nil, T = 0 }
-local function find_wallbang_muzzle(cam, part, mdl)
+find_wallbang_muzzle = function(cam, part, mdl)
 	local my_ch = LP and LP.Character
 	local my_hd = my_ch and (my_ch:FindFirstChild("Head") or my_ch:FindFirstChild("HumanoidRootPart"))
 	local base = (my_hd and my_hd:IsA("BasePart")) and my_hd.Position or cam.CFrame.Position
 	if has_open_los(cam, base, part, mdl) then
+		local chest = base - Vector3.new(0, 1.35, 0)
 		wb_cache.Part = nil
-		return nil
+		if has_open_los(cam, chest, part, mdl) then return nil end
+		return base
 	end
 	local now = os.clock()
 	if wb_cache.Part == part and wb_cache.Pos and (now - wb_cache.T) < 0.05
-		and (base - wb_cache.Base).Magnitude < 1.2 and (part.Position - wb_cache.TgtPos).Magnitude < 1.2 then
+		and (base - wb_cache.Base).Magnitude < 0.5 and (part.Position - wb_cache.TgtPos).Magnitude < 0.5
+		and has_open_los(cam, wb_cache.Pos, part, mdl) then
 		return wb_cache.Pos
 	end
 	local to_tgt = part.Position - base
 	local dist = to_tgt.Magnitude
 	if dist < 0.5 then return nil end
 	local fwd = to_tgt / dist
-	local right = cam.CFrame.RightVector
 	local up = Vector3.new(0, 1, 0)
+	local flat = Vector3.new(fwd.X, 0, fwd.Z)
+	local right = (flat.Magnitude > 0.05) and flat.Unit:Cross(up).Unit or cam.CFrame.RightVector
 	local dirs = {
 		up,
 		right, -right,
@@ -1548,10 +1627,11 @@ local function find_wallbang_muzzle(cam, part, mdl)
 		(up + fwd).Unit,
 		(fwd + right).Unit, (fwd - right).Unit,
 	}
-	if part.Position.Y < base.Y - 2 then table.insert(dirs, -up) end
+	if part.Position.Y < base.Y + 1 then table.insert(dirs, -up) end
 
+	-- Pass 1: closest open origin around shooter (stays near player when peeking single/narrow cover)
 	local found = nil
-	for _, r in ipairs({ 3.0, 6.0, 10.0, 15.0, 22.0 }) do
+	for _, r in ipairs({ 2.0, 4.5, 8.0, 13.0, 19.0, 26.0 }) do
 		if r < dist - 0.5 then
 			for _, d in ipairs(dirs) do
 				local probe = base + d * r
@@ -1561,23 +1641,80 @@ local function find_wallbang_muzzle(cam, part, mdl)
 		end
 	end
 
-	-- Thick walls / multi-room cover fallback: step along fire line past geometry toward target
+	-- Pass 2a: reverse raycast from target toward shooter measures exact air gap past the last wall (solves 2+ walls)
+	local tgt_filter = {}; if my_ch then table.insert(tgt_filter, my_ch) end
+	if cam then table.insert(tgt_filter, cam) end
+	if mdl then table.insert(tgt_filter, mdl) end
 	if not found then
-		for _, frac in ipairs({ 0.30, 0.55, 0.78, 0.92 }) do
-			if dist * frac > 1.5 and dist * (1 - frac) > 0.6 then
+		local rev = bullet_raycast(part.Position, -fwd * dist, tgt_filter, nil)
+		local gap = rev and rev.Distance or dist
+		if gap >= 0.48 then
+			for _, off_d in ipairs({ math.min(2.4, gap * 0.55), gap * 0.30, math.max(0.35, gap - 0.35) }) do
+				if off_d < dist - 0.4 then
+					local probe = part.Position - fwd * off_d
+					if has_open_los(cam, probe, part, mdl) then found = probe; break end
+				end
+			end
+		end
+	end
+
+	-- Pass 2b: outward clearance cage around target (handles target hugging wall #2 or low ceilings)
+	if not found then
+		local tgt_dirs = {
+			up, right, -right, fwd,
+			(-fwd + up).Unit, (up + right).Unit, (up - right).Unit,
+			(fwd + right).Unit, (fwd - right).Unit,
+			(-fwd + right).Unit, (-fwd - right).Unit,
+			-up,
+		}
+		for _, td in ipairs(tgt_dirs) do
+			local h = bullet_raycast(part.Position, td * 4.5, tgt_filter, nil)
+			local probe = nil
+			if not h then
+				probe = part.Position + td * 2.4
+			elseif h.Distance >= 0.52 then
+				probe = part.Position + td * math.min(2.2, h.Distance * 0.65)
+			end
+			if probe and has_open_los(cam, probe, part, mdl) then found = probe; break end
+		end
+	end
+
+	-- Pass 3: fine corridor march fallback
+	if not found then
+		for _, frac in ipairs({ 0.20, 0.35, 0.50, 0.65, 0.78, 0.88, 0.94 }) do
+			if dist * frac > 1.2 and dist * (1 - frac) > 0.4 then
 				local probe = base + fwd * (dist * frac)
 				if has_open_los(cam, probe, part, mdl) then found = probe; break end
 			end
 		end
 	end
-	if not found and dist > 2.5 then
-		for _, off in ipairs({ part.Position - fwd * 2.5, (part.Position + Vector3.new(0, 2.8, 0)) - fwd * 1.6 }) do
-			if has_open_los(cam, off, part, mdl) then found = off; break end
-		end
-	end
 
 	wb_cache.Part, wb_cache.Base, wb_cache.TgtPos, wb_cache.Pos, wb_cache.T = part, base, part.Position, found, now
 	return found
+end
+
+resolve_tgt_wallbang = function(cam, tgt)
+	tgt.WallbangChecked = true
+	tgt.WallbangMuzzle = find_wallbang_muzzle(cam, tgt.Part, tgt.Model)
+	if not tgt.WallbangMuzzle and tgt.Model and tgt.Part.Name ~= "HumanoidRootPart" then
+		local my_ch = LP and LP.Character
+		local my_hd = my_ch and (my_ch:FindFirstChild("Head") or my_ch:FindFirstChild("HumanoidRootPart"))
+		local base = (my_hd and my_hd:IsA("BasePart")) and my_hd.Position or cam.CFrame.Position
+		if not has_open_los(cam, base, tgt.Part, tgt.Model) then
+			for _, alt_name in ipairs({ "UpperTorso", "Torso", "HumanoidRootPart" }) do
+				local ap = tgt.Model:FindFirstChild(alt_name)
+				if ap and ap:IsA("BasePart") and ap ~= tgt.Part then
+					local wb = find_wallbang_muzzle(cam, ap, tgt.Model)
+					if wb or has_open_los(cam, base, ap, tgt.Model) then
+						tgt.Part = ap
+						tgt.WallbangMuzzle = wb
+						if tgt.IsNPC then tgt.NPCId = silent_npc_id(ap, tgt.Model) end
+						break
+					end
+				end
+			end
+		end
+	end
 end
 
 local function update_silent()
@@ -1597,7 +1734,7 @@ local function update_silent()
 
 	local tgt = find_silent_tgt(false)
 	if tgt and tgt.Part and sc.MagicBullet then
-		tgt.WallbangMuzzle = find_wallbang_muzzle(cam, tgt.Part, tgt.Model)
+		resolve_tgt_wallbang(cam, tgt)
 	end
 	S.SilentTgt = tgt
 	if tgt and tgt.Part then

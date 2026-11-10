@@ -39,6 +39,12 @@ local CFG = {
 		Weapon = { Enabled = false, Mode = "Outline + Fill", Style = "Wireframe", Color = Color3.fromRGB(255, 190, 65), OutlineColor = Color3.new(1, 1, 1), FillTransparency = 0.25, OutlineTransparency = 0, AlwaysOnTop = false },
 		Car = { Enabled = false, Mode = "Outline + Fill", Style = "Glossy Flow", Color = Color3.fromRGB(0, 220, 255), OutlineColor = Color3.new(1, 1, 1), FillTransparency = 0.25, OutlineTransparency = 0, AlwaysOnTop = false },
 	},
+	Crosshair = {
+		Enabled = false, Style = "Cross", Position = "Auto",
+		Size = 10, Gap = 4, Thickness = 2, Outline = true, CenterDot = true,
+		Spin = false, SpinSpeed = 2.0, Rainbow = false, HideGameReticle = false,
+		Color = Color3.new(1, 1, 1), OutlineColor = Color3.new(0, 0, 0),
+	},
 }
 
 local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, AimAct = false, AimPos = nil, AimPart = nil, Tab = "AIM", ChamTab = "Players", Scroll = nil }
@@ -462,6 +468,104 @@ local function update_aim_post()
 	else
 		hide_aim_visuals()
 	end
+end
+
+-- Custom Crosshair
+local CrossD = {
+	LO = { drw("Line", { Visible = false, ZIndex = 7 }), drw("Line", { Visible = false, ZIndex = 7 }), drw("Line", { Visible = false, ZIndex = 7 }), drw("Line", { Visible = false, ZIndex = 7 }) },
+	L = { drw("Line", { Visible = false, ZIndex = 8 }), drw("Line", { Visible = false, ZIndex = 8 }), drw("Line", { Visible = false, ZIndex = 8 }), drw("Line", { Visible = false, ZIndex = 8 }) },
+	CO = drw("Circle", { Visible = false, Filled = false, NumSides = 40, ZIndex = 7 }),
+	C = drw("Circle", { Visible = false, Filled = false, NumSides = 40, ZIndex = 8 }),
+	DO = drw("Circle", { Visible = false, Filled = true, NumSides = 16, ZIndex = 7 }),
+	D = drw("Circle", { Visible = false, Filled = true, NumSides = 16, ZIndex = 8 }),
+}
+local reticle_hidden = false
+
+local function set_game_reticle_hidden(hide)
+	local pg = LP:FindFirstChild("PlayerGui")
+	local rg = pg and pg:FindFirstChild("ReticleGui")
+	local ret = rg and rg:FindFirstChild("Reticle")
+	if not ret then return end
+	if hide then
+		local ch = ret:FindFirstChild("Crosshairs")
+		local cr = ret:FindFirstChild("Circle")
+		if ch and ch:IsA("GuiObject") and ch.Visible then ch.Visible = false end
+		if cr and cr:IsA("GuiObject") and cr.Visible then cr.Visible = false end
+		reticle_hidden = true
+	elseif reticle_hidden then
+		reticle_hidden = false
+		local ch = ret:FindFirstChild("Crosshairs")
+		if ch and ch:IsA("GuiObject") then ch.Visible = true end
+	end
+end
+
+local function hide_crosshair()
+	for i = 1, 4 do CrossD.LO[i].Visible, CrossD.L[i].Visible = false, false end
+	CrossD.CO.Visible, CrossD.C.Visible, CrossD.DO.Visible, CrossD.D.Visible = false, false, false, false
+	set_game_reticle_hidden(false)
+end
+
+local function update_crosshair(clk)
+	local cc = CFG.Crosshair
+	local cam = Workspace.CurrentCamera
+	if not cc.Enabled or not cam then hide_crosshair(); return end
+	set_game_reticle_hidden(cc.HideGameReticle)
+
+	local ctr
+	if cc.Position == "Mouse" then
+		ctr = UserInputService:GetMouseLocation()
+	elseif cc.Position == "Center" then
+		ctr = cam.ViewportSize * 0.5
+	else
+		ctr = (UserInputService.MouseBehavior == Enum.MouseBehavior.Default) and UserInputService:GetMouseLocation() or (cam.ViewportSize * 0.5)
+	end
+
+	local col = cc.Rainbow and Color3.fromHSV((clk * 0.35) % 1, 0.85, 1) or cc.Color
+	local ocol = cc.OutlineColor
+	local thk, sz, gap = cc.Thickness, cc.Size, cc.Gap
+	local stn = cc.Style
+
+	if stn == "Circle" then
+		for i = 1, 4 do CrossD.LO[i].Visible, CrossD.L[i].Visible = false, false end
+		CrossD.CO.Visible = cc.Outline
+		if cc.Outline then CrossD.CO.Position, CrossD.CO.Radius, CrossD.CO.Thickness, CrossD.CO.Color = ctr, sz, thk + 2, ocol end
+		CrossD.C.Position, CrossD.C.Radius, CrossD.C.Thickness, CrossD.C.Color, CrossD.C.Visible = ctr, sz, thk, col, true
+	elseif stn == "Dot" then
+		for i = 1, 4 do CrossD.LO[i].Visible, CrossD.L[i].Visible = false, false end
+		CrossD.CO.Visible, CrossD.C.Visible = false, false
+	else
+		CrossD.CO.Visible, CrossD.C.Visible = false, false
+		local base_ang = (cc.Spin and (clk * cc.SpinSpeed) or 0) + (stn == "X-Cross" and (math.pi * 0.25) or 0)
+		for i = 1, 4 do
+			if stn == "T-Shape" and i == 4 then
+				CrossD.LO[i].Visible, CrossD.L[i].Visible = false, false
+			else
+				local a = base_ang + (i - 1) * (math.pi * 0.5)
+				local dir = Vector2.new(math.cos(a), math.sin(a))
+				local p1, p2 = ctr + dir * gap, ctr + dir * (gap + sz)
+				CrossD.LO[i].Visible = cc.Outline
+				if cc.Outline then CrossD.LO[i].From, CrossD.LO[i].To, CrossD.LO[i].Thickness, CrossD.LO[i].Color = p1, p2, thk + 2, ocol end
+				CrossD.L[i].From, CrossD.L[i].To, CrossD.L[i].Thickness, CrossD.L[i].Color, CrossD.L[i].Visible = p1, p2, thk, col, true
+			end
+		end
+	end
+
+	local show_dot = cc.CenterDot or stn == "Dot"
+	if show_dot then
+		local dr = math.max(1.5, thk * 0.8)
+		CrossD.DO.Visible = cc.Outline
+		if cc.Outline then CrossD.DO.Position, CrossD.DO.Radius, CrossD.DO.Color = ctr, dr + 1.2, ocol end
+		CrossD.D.Position, CrossD.D.Radius, CrossD.D.Color, CrossD.D.Visible = ctr, dr, col, true
+	else
+		CrossD.DO.Visible, CrossD.D.Visible = false, false
+	end
+end
+
+local function cleanup_crosshair()
+	hide_crosshair()
+	for i = 1, 4 do pcall(function() CrossD.LO[i]:Remove() end); pcall(function() CrossD.L[i]:Remove() end) end
+	pcall(function() CrossD.CO:Remove() end); pcall(function() CrossD.C:Remove() end)
+	pcall(function() CrossD.DO:Remove() end); pcall(function() CrossD.D:Remove() end)
 end
 
 -- San Diego ESP
@@ -1493,6 +1597,21 @@ local function build_ui(destroy_fn)
 	end
 
 	local mpg = mk_pg("MISC")
+	hdr_lbl(mpg, "Custom Crosshair")
+	tog(mpg, "Enable Crosshair", function() return CFG.Crosshair.Enabled end, function(v) CFG.Crosshair.Enabled = v end)
+	sel(mpg, "Style", { "Cross", "T-Shape", "X-Cross", "Circle", "Dot" }, function() return CFG.Crosshair.Style end, function(v) CFG.Crosshair.Style = v end)
+	sel(mpg, "Position", { "Auto", "Center", "Mouse" }, function() return CFG.Crosshair.Position end, function(v) CFG.Crosshair.Position = v end)
+	sld(mpg, "Size", 2, 32, 1, "px", function() return CFG.Crosshair.Size end, function(v) CFG.Crosshair.Size = v end)
+	sld(mpg, "Gap", 0, 20, 1, "px", function() return CFG.Crosshair.Gap end, function(v) CFG.Crosshair.Gap = v end)
+	sld(mpg, "Thickness", 1, 6, 1, "px", function() return CFG.Crosshair.Thickness end, function(v) CFG.Crosshair.Thickness = v end)
+	tog(mpg, "Center Dot", function() return CFG.Crosshair.CenterDot end, function(v) CFG.Crosshair.CenterDot = v end)
+	tog(mpg, "Outline", function() return CFG.Crosshair.Outline end, function(v) CFG.Crosshair.Outline = v end)
+	tog(mpg, "Spin", function() return CFG.Crosshair.Spin end, function(v) CFG.Crosshair.Spin = v end)
+	sld(mpg, "Spin Speed", 0.5, 8.0, 0.5, "x", function() return CFG.Crosshair.SpinSpeed end, function(v) CFG.Crosshair.SpinSpeed = v end)
+	tog(mpg, "Rainbow Color", function() return CFG.Crosshair.Rainbow end, function(v) CFG.Crosshair.Rainbow = v end)
+	tog(mpg, "Hide Game Reticle", function() return CFG.Crosshair.HideGameReticle end, function(v) CFG.Crosshair.HideGameReticle = v end)
+	col_row(mpg, "Crosshair Color", function() return CFG.Crosshair.Color end, function(c) CFG.Crosshair.Color = c end)
+	col_row(mpg, "Outline Color", function() return CFG.Crosshair.OutlineColor end, function(c) CFG.Crosshair.OutlineColor = c end)
 	hdr_lbl(mpg, "Mobile & Interface")
 	sld(mpg, "Menu Scale", 0.75, 1.30, 0.05, "x", function() return CFG.Menu.UIScale end, function(v) CFG.Menu.UIScale = v; upd_scale() end)
 	tog(mpg, "Show [OCEL] Toggle Pill", function() return CFG.Menu.ShowTogglePill end, function(v) CFG.Menu.ShowTogglePill = v; if UI.TPill then UI.TPill.Visible = v end end)
@@ -1517,6 +1636,7 @@ local function destroy_all()
 	for pl in pairs(ESP_E) do del_esp(pl) end
 	for mdl in pairs(NPC_E) do del_npc_esp(mdl) end
 	for _, d in pairs(AimD) do pcall(function() d:Remove() end) end
+	cleanup_crosshair()
 	cleanup_chams()
 	if UI.Gui then pcall(function() UI.Gui:Destroy() end) end
 	if getgenv and getgenv().OcelHub == ctrl then getgenv().OcelHub = nil end
@@ -1547,4 +1667,4 @@ tc(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(upd_scale))
 build_ui(destroy_all)
 RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
 RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
-tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then update_esp(); update_chams(os.clock()) end end))
+tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk) end end))

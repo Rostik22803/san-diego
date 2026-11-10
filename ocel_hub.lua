@@ -7,7 +7,7 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local CoreGui = game:GetService("CoreGui")
-local LP = Players.LocalPlayer
+local LP = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
 if getgenv and getgenv().OcelHub then pcall(function() getgenv().OcelHub:Destroy() end) end
 
@@ -960,14 +960,6 @@ local function strip_cl(ch)
 	end
 end
 
-local function vpart(i)
-	return i:IsA("BasePart") and i.Name ~= "HumanoidRootPart" and i.Name ~= "FakeCamera" and i:GetAttribute("OcelIgnore") ~= true
-end
-
-local function part_vis(p)
-	return p and p.Parent and p.Transparency < 0.98 and p.LocalTransparencyModifier < 0.98
-end
-
 local function draw_wire_mesh(k, pts, mdl, cfg, clk, ov)
 	local cam = Workspace.CurrentCamera
 	if not cam then return end
@@ -1007,6 +999,14 @@ local function draw_wire_mesh(k, pts, mdl, cfg, clk, ov)
 		end
 	end
 	for i = idx + 1, #pool do pool[i].Visible = false end
+end
+
+local function vpart(i)
+	return i:IsA("BasePart") and i.Name ~= "HumanoidRootPart" and i.Name ~= "FakeCamera" and i:GetAttribute("OcelIgnore") ~= true
+end
+
+local function part_vis(p)
+	return p and p.Parent and p.Transparency < 0.98 and p.LocalTransparencyModifier < 0.98
 end
 
 local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
@@ -1196,13 +1196,51 @@ end
 local GM = {
 	Hooked = false, GunConfig = nil, DynamicCast = nil, GunAim = nil, CamCtrl = nil, RecoilSpring = nil,
 	OrigDCRun = nil, OrigRCAP = nil, OrigIAPR = nil, OrigRCD = nil, OrigIP = nil, OrigSI = nil,
-	OrigStats = {}, ByTbl = {}, ReloadIds = {}, PatchedCD = {}, FastTracks = {}, LastSig = "",
+	OrigFuncs = {}, HookModes = {}, OrigStats = {}, ByTbl = {}, ReloadIds = {}, PatchedCD = {}, FastTracks = {},
+	HasPatchedUpvals = false, UpvalBusy = false, UpvalPending = false, LastSig = "false|false|2.50|false|false",
 }
+
+local function safe_set(tbl, k, v)
+	if type(tbl) ~= "table" then return false end
+	if ((type(table.isfrozen) == "function" and table.isfrozen(tbl)) or (type(isreadonly) == "function" and isreadonly(tbl))) and type(setreadonly) == "function" then
+		pcall(setreadonly, tbl, false)
+	end
+	local ok = pcall(function() tbl[k] = v end)
+	return ok
+end
+
+local function hook_fn(tbl, key, orig_key, wrapper)
+	if type(tbl) ~= "table" or type(tbl[key]) ~= "function" or GM[orig_key] then return end
+	local orig = tbl[key]
+	if safe_set(tbl, key, wrapper) then
+		GM[orig_key] = orig
+		GM.HookModes[orig_key] = { tbl = tbl, key = key, mode = "tbl" }
+		return
+	end
+	if type(hookfunction) == "function" then
+		local ok, old = pcall(hookfunction, orig, wrapper)
+		if ok and type(old) == "function" then
+			GM[orig_key] = old
+			GM.HookModes[orig_key] = { orig = orig, mode = "hf" }
+		end
+	end
+end
 
 local function mod_req(...)
 	local cur = ReplicatedStorage
 	for i = 1, select("#", ...) do cur = cur and cur:FindFirstChild(select(i, ...)) end
-	if cur and cur:IsA("ModuleScript") then local ok, res = pcall(require, cur); if ok then return res end end
+	if not cur or not cur:IsA("ModuleScript") then return nil end
+	local ok, res = pcall(require, cur)
+	if ok and res ~= nil then return res end
+	if type(getthreadidentity) == "function" and type(setthreadidentity) == "function" then
+		local ok_id, old_id = pcall(getthreadidentity)
+		if ok_id and old_id then
+			pcall(setthreadidentity, 2)
+			ok, res = pcall(require, cur)
+			pcall(setthreadidentity, old_id)
+			if ok and res ~= nil then return res end
+		end
+	end
 	return nil
 end
 
@@ -1216,43 +1254,68 @@ local function roll_silent()
 end
 
 local function sync_gun_upvals()
-	if not GM.GunConfig or typeof(getgc) ~= "function" or typeof(debug) ~= "table" or typeof(debug.getupvalues) ~= "function" or typeof(debug.setupvalue) ~= "function" then return end
-	local ok_gc, gc = pcall(getgc, false)
-	if not ok_gc or type(gc) ~= "table" then return end
-	for _, fn in ipairs(gc) do
-		if type(fn) == "function" then
-			local ok_u, ups = pcall(debug.getupvalues, fn)
-			if ok_u and type(ups) == "table" then
-				local matched = nil
-				for _, val in pairs(ups) do
-					if type(val) == "table" and GM.ByTbl[val] then matched = val; break end
-				end
-				if matched then
-					local orig = GM.OrigStats[matched]
-					if orig and type(orig.RPM) == "number" and orig.RPM > 0 then
-						local orig_cd = 60 / orig.RPM
-						local new_rpm = (CFG.Gun.RapidFire and not S.Destroyed) and math.clamp(math.round(orig.RPM * CFG.Gun.RapidFireScale), orig.RPM, 3000) or orig.RPM
-						local new_cd = 60 / new_rpm
-						local prev_cd = GM.PatchedCD[fn] or orig_cd
-						for idx, val in pairs(ups) do
-							if type(val) == "number" then
-								if math.abs(val - prev_cd) < 0.0008 or math.abs(val - orig_cd) < 0.0008 then
-									pcall(debug.setupvalue, fn, idx, new_cd)
-								elseif CFG.Gun.RapidFire and not S.Destroyed and val > new_cd and val <= prev_cd + 0.005 then
-									pcall(debug.setupvalue, fn, idx, new_cd)
+	if S.Destroyed then return end
+	if not CFG.Gun.RapidFire and not GM.HasPatchedUpvals then return end
+	if not GM.GunConfig or type(getgc) ~= "function" or type(debug) ~= "table" or type(debug.getupvalues) ~= "function" or type(debug.setupvalue) ~= "function" then return end
+	if GM.UpvalBusy then GM.UpvalPending = true; return end
+	GM.UpvalBusy = true
+	task.spawn(function()
+		repeat
+			GM.UpvalPending = false
+			local want_rapid = CFG.Gun.RapidFire and not S.Destroyed
+			if want_rapid or GM.HasPatchedUpvals then
+				local ok_gc, gc = pcall(getgc, false)
+				if ok_gc and type(gc) == "table" then
+					local patched_any = false
+					for i, fn in ipairs(gc) do
+						if i % 1500 == 0 then
+							task.wait()
+							if S.Destroyed and GM.HasPatchedUpvals == false then break end
+						end
+						if type(fn) == "function" and (type(iscclosure) ~= "function" or not iscclosure(fn)) and (type(isexecutorclosure) ~= "function" or not isexecutorclosure(fn)) then
+							local ok_u, ups = pcall(debug.getupvalues, fn)
+							if ok_u and type(ups) == "table" then
+								local matched = nil
+								for _, val in pairs(ups) do
+									if type(val) == "table" and GM.ByTbl[val] then matched = val; break end
+								end
+								if matched then
+									local orig = GM.OrigStats[matched]
+									if orig and type(orig.RPM) == "number" and orig.RPM > 0 then
+										local orig_cd = 60 / orig.RPM
+										local new_rpm = (CFG.Gun.RapidFire and not S.Destroyed) and math.clamp(math.round(orig.RPM * CFG.Gun.RapidFireScale), orig.RPM, 3000) or orig.RPM
+										local new_cd = 60 / new_rpm
+										local prev_cd = GM.PatchedCD[fn] or orig_cd
+										for idx, val in pairs(ups) do
+											if type(val) == "number" then
+												if math.abs(val - prev_cd) < 0.0008 or math.abs(val - orig_cd) < 0.0008 then
+													pcall(debug.setupvalue, fn, idx, new_cd)
+													patched_any = true
+												elseif CFG.Gun.RapidFire and not S.Destroyed and val > new_cd and val <= prev_cd + 0.005 then
+													pcall(debug.setupvalue, fn, idx, new_cd)
+													patched_any = true
+												end
+											end
+										end
+										GM.PatchedCD[fn] = new_cd
+									end
 								end
 							end
 						end
-						GM.PatchedCD[fn] = new_cd
 					end
+					if want_rapid and patched_any then GM.HasPatchedUpvals = true end
+					if not want_rapid then GM.HasPatchedUpvals = false end
 				end
 			end
-		end
-	end
+		until not GM.UpvalPending
+		GM.UpvalBusy = false
+	end)
 end
 
 local function sync_gun_configs()
 	if not GM.GunConfig then return end
+	local any_stat = CFG.Gun.RapidFire or CFG.Gun.AutoFire or CFG.Gun.NoSpread or CFG.Gun.NoRecoil or next(GM.OrigStats) ~= nil
+	if not any_stat then return end
 	for name, entry in pairs(GM.GunConfig) do
 		if type(entry) == "table" and type(entry.Stats) == "table" then
 			local st_t = entry.Stats
@@ -1267,30 +1330,32 @@ local function sync_gun_configs()
 				GM.ByTbl[entry] = name
 			end
 			if type(orig.RPM) == "number" then
-				st_t.RPM = CFG.Gun.RapidFire and math.clamp(math.round(orig.RPM * CFG.Gun.RapidFireScale), orig.RPM, 3000) or orig.RPM
+				safe_set(st_t, "RPM", CFG.Gun.RapidFire and math.clamp(math.round(orig.RPM * CFG.Gun.RapidFireScale), orig.RPM, 3000) or orig.RPM)
 			end
 			if orig.FireMode ~= nil then
-				st_t.FireMode = CFG.Gun.AutoFire and "Automatic" or orig.FireMode
+				safe_set(st_t, "FireMode", CFG.Gun.AutoFire and "Automatic" or orig.FireMode)
 			end
 			if type(orig.Spread) == "number" then
-				st_t.BulletSpreadDegrees = CFG.Gun.NoSpread and 0 or orig.Spread
+				safe_set(st_t, "BulletSpreadDegrees", CFG.Gun.NoSpread and 0 or orig.Spread)
 			end
 			if type(orig.SSpread) == "number" then
-				st_t.ShotgunSpreadDegrees = CFG.Gun.NoSpread and 0 or orig.SSpread
+				safe_set(st_t, "ShotgunSpreadDegrees", CFG.Gun.NoSpread and 0 or orig.SSpread)
 			end
 			if type(orig.Recoil1) == "number" then
-				st_t.FirstPersonCameraRecoilFactor = CFG.Gun.NoRecoil and 0 or orig.Recoil1
+				safe_set(st_t, "FirstPersonCameraRecoilFactor", CFG.Gun.NoRecoil and 0 or orig.Recoil1)
 			end
 			if type(orig.Recoil3) == "number" then
-				st_t.ThirdPersonCameraRecoilFactor = CFG.Gun.NoRecoil and 0 or orig.Recoil3
+				safe_set(st_t, "ThirdPersonCameraRecoilFactor", CFG.Gun.NoRecoil and 0 or orig.Recoil3)
 			end
 		end
 	end
-	sync_gun_upvals()
+	if CFG.Gun.RapidFire or GM.HasPatchedUpvals then
+		sync_gun_upvals()
+	end
 end
 
 local function hook_gun_modules()
-	if GM.Hooked then return end
+	if GM.Hooked or S.Destroyed then return end
 	GM.Hooked = true
 
 	GM.GunConfig = mod_req("SharedModules", "Configs", "GunConfig")
@@ -1299,27 +1364,31 @@ local function hook_gun_modules()
 	GM.CamCtrl = mod_req("ClientModules", "CameraController")
 
 	if GM.GunConfig then
-		for _, entry in pairs(GM.GunConfig) do
-			if type(entry) == "table" and type(entry.Animations) == "table" then
-				for _, grp in pairs(entry.Animations) do
-					if type(grp) == "table" then
-						for k, id in pairs(grp) do
-							if type(k) == "string" and string.find(k, "Reload") and (type(id) == "number" or type(id) == "string") then
-								local sid = tostring(id)
-								GM.ReloadIds[sid] = true
-								GM.ReloadIds["rbxassetid://" .. sid] = true
+		for name, entry in pairs(GM.GunConfig) do
+			if type(entry) == "table" then
+				GM.ByTbl[entry] = name
+				if type(entry.Animations) == "table" then
+					for _, grp in pairs(entry.Animations) do
+						if type(grp) == "table" then
+							for k, id in pairs(grp) do
+								if type(k) == "string" and string.find(k, "Reload") and (type(id) == "number" or type(id) == "string") then
+									local sid = tostring(id)
+									GM.ReloadIds[sid] = true
+									GM.ReloadIds["rbxassetid://" .. sid] = true
+								end
 							end
 						end
 					end
 				end
 			end
 		end
-		sync_gun_configs()
+		if CFG.Gun.RapidFire or CFG.Gun.AutoFire or CFG.Gun.NoSpread or CFG.Gun.NoRecoil then
+			sync_gun_configs()
+		end
 	end
 
-	if GM.DynamicCast and type(GM.DynamicCast.Run) == "function" then
-		GM.OrigDCRun = GM.DynamicCast.Run
-		GM.DynamicCast.Run = function(origin, dir, params, pierce, radius, dbg, ...)
+	if GM.DynamicCast then
+		hook_fn(GM.DynamicCast, "Run", "OrigDCRun", function(origin, dir, params, pierce, radius, dbg, ...)
 			if not S.Destroyed and CFG.Aim.SilentAim and S.SilentPart and S.SilentPart.Parent and S.SilentHitPos then
 				local cam = Workspace.CurrentCamera
 				local ch = LP.Character
@@ -1332,57 +1401,44 @@ local function hook_gun_modules()
 				end
 			end
 			return GM.OrigDCRun(origin, dir, params, pierce, radius, dbg, ...)
-		end
+		end)
 	end
 
 	if GM.GunAim then
-		if type(GM.GunAim.ResolveCameraAimPoint) == "function" then
-			GM.OrigRCAP = GM.GunAim.ResolveCameraAimPoint
-			GM.GunAim.ResolveCameraAimPoint = function(self, ...)
-				if not S.Destroyed and CFG.Aim.SilentAim and S.SilentPart and S.SilentPart.Parent and S.SilentProjPos and roll_silent() then
-					return S.SilentProjPos
-				end
-				return GM.OrigRCAP(self, ...)
+		hook_fn(GM.GunAim, "ResolveCameraAimPoint", "OrigRCAP", function(self, ...)
+			if not S.Destroyed and CFG.Aim.SilentAim and S.SilentPart and S.SilentPart.Parent and S.SilentProjPos and roll_silent() then
+				return S.SilentProjPos
 			end
-		end
-		if type(GM.GunAim.IsAimPointReachable) == "function" then
-			GM.OrigIAPR = GM.GunAim.IsAimPointReachable
-			GM.GunAim.IsAimPointReachable = function(self, orig, pt, ...)
-				if not S.Destroyed and CFG.Aim.SilentAim and S.SilentProjPos and (pt - S.SilentProjPos).Magnitude < 3 then
-					return true
-				end
-				return GM.OrigIAPR(self, orig, pt, ...)
+			return GM.OrigRCAP(self, ...)
+		end)
+		hook_fn(GM.GunAim, "IsAimPointReachable", "OrigIAPR", function(self, orig, pt, ...)
+			if not S.Destroyed and CFG.Aim.SilentAim and S.SilentProjPos and (pt - S.SilentProjPos).Magnitude < 3 then
+				return true
 			end
-		end
-		if type(GM.GunAim.ResolveConvergedDirection) == "function" then
-			GM.OrigRCD = GM.GunAim.ResolveConvergedDirection
-			GM.GunAim.ResolveConvergedDirection = function(self, orig, aim_pt, fallback, ...)
-				if not S.Destroyed and CFG.Aim.SilentAim and S.SilentProjPos and (aim_pt - S.SilentProjPos).Magnitude < 3 then
-					local d = aim_pt - orig
-					if d.Magnitude > 1e-4 then return d.Unit end
-				end
-				return GM.OrigRCD(self, orig, aim_pt, fallback, ...)
+			return GM.OrigIAPR(self, orig, pt, ...)
+		end)
+		hook_fn(GM.GunAim, "ResolveConvergedDirection", "OrigRCD", function(self, orig, aim_pt, fallback, ...)
+			if not S.Destroyed and CFG.Aim.SilentAim and S.SilentProjPos and (aim_pt - S.SilentProjPos).Magnitude < 3 then
+				local d = aim_pt - orig
+				if d.Magnitude > 1e-4 then return d.Unit end
 			end
-		end
+			return GM.OrigRCD(self, orig, aim_pt, fallback, ...)
+		end)
 	end
 
 	if GM.CamCtrl then
-		if type(GM.CamCtrl.ImpulsePitch) == "function" then
-			GM.OrigIP = GM.CamCtrl.ImpulsePitch
-			GM.CamCtrl.ImpulsePitch = function(self, amt, ...)
-				if not S.Destroyed and CFG.Gun.NoRecoil then return end
-				return GM.OrigIP(self, amt, ...)
-			end
-		end
+		hook_fn(GM.CamCtrl, "ImpulsePitch", "OrigIP", function(self, amt, ...)
+			if not S.Destroyed and CFG.Gun.NoRecoil then return end
+			return GM.OrigIP(self, amt, ...)
+		end)
 		if type(GM.CamCtrl.GetRecoilSpring) == "function" then
 			local ok_sp, spr = pcall(GM.CamCtrl.GetRecoilSpring, GM.CamCtrl)
 			if ok_sp and type(spr) == "table" and type(spr.Impulse) == "function" then
 				GM.RecoilSpring = spr
-				GM.OrigSI = spr.Impulse
-				spr.Impulse = function(self, amt, ...)
+				hook_fn(spr, "Impulse", "OrigSI", function(self, amt, ...)
 					if not S.Destroyed and CFG.Gun.NoRecoil then return end
 					return GM.OrigSI(self, amt, ...)
-				end
+				end)
 			end
 		end
 	end
@@ -1438,15 +1494,26 @@ local function update_gun_mods()
 	end
 end
 
-local function cleanup_gun_mods()
-	if GM.DynamicCast and GM.OrigDCRun then GM.DynamicCast.Run = GM.OrigDCRun end
-	if GM.GunAim then
-		if GM.OrigRCAP then GM.GunAim.ResolveCameraAimPoint = GM.OrigRCAP end
-		if GM.OrigIAPR then GM.GunAim.IsAimPointReachable = GM.OrigIAPR end
-		if GM.OrigRCD then GM.GunAim.ResolveConvergedDirection = GM.OrigRCD end
+local function unhook_fn(orig_key)
+	local info = GM.HookModes[orig_key]
+	local orig = GM[orig_key]
+	if not info or not orig then return end
+	if info.mode == "tbl" then
+		safe_set(info.tbl, info.key, orig)
+	elseif info.mode == "hf" and type(hookfunction) == "function" then
+		pcall(hookfunction, info.orig, orig)
 	end
-	if GM.CamCtrl and GM.OrigIP then GM.CamCtrl.ImpulsePitch = GM.OrigIP end
-	if GM.RecoilSpring and GM.OrigSI then GM.RecoilSpring.Impulse = GM.OrigSI end
+	GM[orig_key] = nil
+	GM.HookModes[orig_key] = nil
+end
+
+local function cleanup_gun_mods()
+	unhook_fn("OrigDCRun")
+	unhook_fn("OrigRCAP")
+	unhook_fn("OrigIAPR")
+	unhook_fn("OrigRCD")
+	unhook_fn("OrigIP")
+	unhook_fn("OrigSI")
 	CFG.Gun.RapidFire, CFG.Gun.AutoFire, CFG.Gun.FastReload, CFG.Gun.NoRecoil, CFG.Gun.NoSpread = false, false, false, false, false
 	sync_gun_configs()
 	for tr in pairs(GM.FastTracks) do pcall(function() tr:AdjustSpeed(1) end) end
@@ -1652,8 +1719,8 @@ end))
 tc(UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then S.FireHold = false end end))
 tc(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(upd_scale))
 
-hook_gun_modules()
 build_ui(destroy_all)
+task.spawn(pcall, hook_gun_modules)
 RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
 RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
 tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then update_esp(); update_chams(os.clock()); update_gun_mods() end end))

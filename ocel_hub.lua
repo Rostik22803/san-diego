@@ -23,7 +23,7 @@ local CFG = {
 	},
 	ESP = {
 		Enabled = true, MaxDistance = 1500, TeamCheck = false, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
-		ShowBorderBots = true, BorderBotsOnly = true, ColorBorderBot = Color3.fromRGB(255, 140, 50),
+		ShowBorderBots = true, BotFilter = "Border + Jewelry", ColorBorderBot = Color3.fromRGB(255, 140, 50), ColorJewelryBot = Color3.fromRGB(255, 70, 175),
 		ShowBox = true, BoxOutline = true, BoxThickness = 1, ShowSkeleton = true, SkeletonOutline = true,
 		SkeletonThickness = 1.5, ShowHeadCircle = true, ShowHealthBar = true, ShowName = true,
 		ShowDistance = true, ShowTeamTag = true, ShowWanted = true, ShowTracers = false, TracerOrigin = "Bottom",
@@ -50,12 +50,15 @@ local CFG = {
 		FOV = 140, ShowFOV = true, FOVColor = Color3.fromRGB(255, 85, 85),
 		HitChance = 100, MaxDistance = 800, WallCheck = true, MagicBullet = false,
 		TeamCheck = false, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
-		TargetNPCs = false, NPCsCheckpointOnly = true,
+		TargetNPCs = false, BotFilter = "Border + Jewelry",
 		Prediction = true, PredictionScale = 0.12, ShowSnapline = true, ShowTarget = true,
 	},
 	Tracers = {
 		Enabled = false, Duration = 1.0, Thickness = 0.14,
 		Fade = true, Rainbow = false, Color = Color3.fromRGB(0, 220, 255),
+	},
+	Camera = {
+		OverrideFOV = false, FOV = 90,
 	},
 }
 
@@ -458,6 +461,7 @@ end
 local function update_aim_post()
 	local cam = Workspace.CurrentCamera
 	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible = false, false; hide_aim_visuals(); return end
+	if CFG.Camera.OverrideFOV then cam.FieldOfView = CFG.Camera.FOV end
 	local ctr = aim_origin(cam)
 	local sf = CFG.Aim.Enabled and CFG.Aim.ShowFOV
 	AimD.FOVOut.Visible, AimD.FOV.Visible = sf and not CFG.Aim.FOVFilled, sf
@@ -762,16 +766,86 @@ local function del_npc_esp(mdl)
 	free_esp_entry(e)
 end
 
+local NPCGC = { Map = nil, Entities = nil, LastScan = 0 }
+local function scan_npc_gc()
+	local now = os.clock()
+	if (NPCGC.Map and NPCGC.Entities) or (now - NPCGC.LastScan) < 2.0 then return end
+	if typeof(getgc) ~= "function" then return end
+	NPCGC.LastScan = now
+	pcall(function()
+		for _, obj in ipairs(getgc(true)) do
+			if typeof(obj) == "table" then
+				if not NPCGC.Map then
+					local eop = rawget(obj, "EntityOfPart")
+					if typeof(eop) == "table" and (rawget(obj, "HumanoidPools") ~= nil or next(eop) ~= nil) then
+						NPCGC.Map = eop
+					end
+				end
+				if not NPCGC.Entities then
+					local ents = rawget(obj, "Entities")
+					if typeof(ents) == "table" then
+						local _, first = next(ents)
+						if typeof(first) == "table" and rawget(first, "Archetype") ~= nil then
+							NPCGC.Entities = ents
+						end
+					end
+				end
+				if NPCGC.Map and NPCGC.Entities then break end
+			end
+		end
+	end)
+end
+
+local function npc_meta(part, mdl)
+	local aid = part and (part:GetAttribute("NPCId") or (part.Parent and part.Parent:GetAttribute("NPCId")))
+	if typeof(aid) ~= "number" or aid == 0 then
+		scan_npc_gc()
+		if NPCGC.Map then
+			if part then
+				local id = NPCGC.Map[part]
+				if typeof(id) == "number" and id ~= 0 then aid = id end
+			end
+			if (not aid or aid == 0) and mdl then
+				for _, ch in ipairs(mdl:GetChildren()) do
+					if ch:IsA("BasePart") then
+						local id = NPCGC.Map[ch]
+						if typeof(id) == "number" and id ~= 0 then aid = id; break end
+					end
+				end
+			end
+		end
+	end
+	local arch
+	if typeof(aid) == "number" and aid ~= 0 then
+		scan_npc_gc()
+		local ent = NPCGC.Entities and NPCGC.Entities[aid]
+		arch = typeof(ent) == "table" and ent.Archetype or nil
+	end
+	return (typeof(aid) == "number" and aid ~= 0) and aid or nil, arch
+end
+
+local function npc_matches_filter(filter, is_border, is_jewelry)
+	if filter == "All NPCs" then return true end
+	if filter == "Border Only" then return is_border end
+	if filter == "Jewelry Only" then return is_jewelry end
+	return is_border or is_jewelry
+end
+
 local function npc_info(mdl, rt)
 	local nt = rt:FindFirstChild("Nametag")
 	local nar = nt and nt:FindFirstChild("NameAndRank")
 	local plbl = nar and nar:FindFirstChild("PlayerName")
 	local rlbl = nar and nar:FindFirstChild("RankName")
-	local nm = (plbl and plbl:IsA("TextLabel") and plbl.Text ~= "") and plbl.Text or mdl.Name
+	local _, arch = npc_meta(rt, mdl)
+	local aname = typeof(arch) == "table" and arch.Name or ""
+	local adisp = typeof(arch) == "table" and arch.DisplayName or ""
+	local nm = (plbl and plbl:IsA("TextLabel") and plbl.Text ~= "") and plbl.Text or (adisp ~= "" and adisp or mdl.Name)
 	local rk = (rlbl and rlbl:IsA("TextLabel")) and rlbl.Text or ""
 	local tc_col = (rlbl and rlbl:IsA("TextLabel")) and rlbl.TextColor3 or nil
-	local is_border = (rk:find("Checkpoint", 1, true) ~= nil) or (nm:find("Checkpoint", 1, true) ~= nil)
-	return nm, rk, tc_col, is_border
+	local is_border = (aname == "CheckpointOfficer") or (rk:find("Checkpoint", 1, true) ~= nil) or (nm:find("Checkpoint", 1, true) ~= nil)
+	-- JewelleryGuard has Nametag = false in NPCArchetypes; fall back to missing Nametag before Replica populates
+	local is_jewelry = (aname == "JewelleryGuard") or (adisp == "Security Guard") or (not is_border and aname == "" and nt == nil)
+	return nm, rk, tc_col, is_border, is_jewelry, aname
 end
 
 local function npc_alive(mdl, hum, rt)
@@ -873,10 +947,11 @@ local function update_esp()
 		if not npc_alive(mdl, hum, rt) then hide_esp(e); continue end
 		local dist = (rt.Position - cp).Magnitude
 		if dist > CFG.ESP.MaxDistance then hide_esp(e); continue end
-		local nm, rk, _, is_border = npc_info(mdl, rt)
-		if CFG.ESP.BorderBotsOnly and not is_border then hide_esp(e); continue end
-		local tag = (rk ~= "" and rk) or (is_border and "Checkpoint Authority" or "NPC")
-		render_esp_entry(e, cam, vp, mdl, hum, dist, CFG.ESP.ColorBorderBot, nm .. " [BOT]", tag)
+		local nm, rk, _, is_border, is_jewelry = npc_info(mdl, rt)
+		if not npc_matches_filter(CFG.ESP.BotFilter, is_border, is_jewelry) then hide_esp(e); continue end
+		local col = is_jewelry and CFG.ESP.ColorJewelryBot or CFG.ESP.ColorBorderBot
+		local tag = (rk ~= "" and rk) or (is_jewelry and "Security Guard" or (is_border and "Checkpoint Authority" or "NPC"))
+		render_esp_entry(e, cam, vp, mdl, hum, dist, col, nm .. " [BOT]", tag)
 	end
 end
 
@@ -909,30 +984,10 @@ local function queue_tryshoot_tracers(shots)
 		end
 	end
 end
-local npc_entity_map, npc_map_scanned = nil, false
-local function silent_npc_id(part)
+local function silent_npc_id(part, mdl)
 	if not part or not part:IsA("BasePart") then return nil end
-	local aid = part:GetAttribute("NPCId") or (part.Parent and part.Parent:GetAttribute("NPCId"))
-	if typeof(aid) == "number" and aid ~= 0 then return aid end
-	if not npc_map_scanned and typeof(getgc) == "function" then
-		npc_map_scanned = true
-		pcall(function()
-			for _, obj in ipairs(getgc(true)) do
-				if typeof(obj) == "table" then
-					local eop = rawget(obj, "EntityOfPart")
-					if typeof(eop) == "table" and next(eop) ~= nil then
-						npc_entity_map = eop
-						break
-					end
-				end
-			end
-		end)
-	end
-	if npc_entity_map then
-		local id = npc_entity_map[part]
-		if typeof(id) == "number" and id ~= 0 then return id end
-	end
-	return nil
+	local id = npc_meta(part, mdl)
+	return id
 end
 
 local function silent_origin(cam)
@@ -1010,7 +1065,7 @@ local function find_silent_tgt(for_shot)
 		if not on or sp.Z <= 0.2 then return end
 		local fd = (Vector2.new(sp.X, sp.Y) - ctr).Magnitude
 		if fd > sc.FOV then return end
-		if sc.WallCheck and not can_see(cam, cam.CFrame.Position, part, mdl) then return end
+		if sc.WallCheck and not sc.MagicBullet and not can_see(cam, cam.CFrame.Position, part, mdl) then return end
 		local score = (sc.Priority == "Distance" and wd)
 			or (sc.Priority == "Lowest HP" and ((hum and hum.Health or 100) + fd * 0.05))
 			or (sc.Priority == "Hybrid" and (fd + wd * 0.22))
@@ -1020,7 +1075,7 @@ local function find_silent_tgt(for_shot)
 			best_tgt = {
 				Model = mdl, Player = pl, Hum = hum, Part = part,
 				Parts = (not for_shot and sc.TargetPart == "Random") and collect_tgt_parts(mdl) or nil,
-				NPCId = (not for_shot and is_npc) and silent_npc_id(part) or nil,
+				NPCId = (not for_shot and is_npc) and silent_npc_id(part, mdl) or nil,
 				Fov = fd, Dist = wd, IsNPC = is_npc,
 			}
 		end
@@ -1038,8 +1093,8 @@ local function find_silent_tgt(for_shot)
 			local hum = mdl:FindFirstChildOfClass("Humanoid")
 			local rt = (hum and hum.RootPart) or mdl:FindFirstChild("HumanoidRootPart") or mdl.PrimaryPart
 			if npc_alive(mdl, hum, rt) then
-				local _, _, _, is_border = npc_info(mdl, rt)
-				if not sc.NPCsCheckpointOnly or is_border then eval_model(mdl, hum, nil, true) end
+				local _, _, _, is_border, is_jewelry = npc_info(mdl, rt)
+				if npc_matches_filter(sc.BotFilter, is_border, is_jewelry) then eval_model(mdl, hum, nil, true) end
 			end
 		end
 	end
@@ -1049,9 +1104,12 @@ end
 local last_cast_roll = { T = 0, Pass = false, Tgt = nil }
 local function sample_silent_shot(use_cached)
 	local now = os.clock()
-	if now - last_cast_roll.T < 0.008 then return last_cast_roll.Pass, last_cast_roll.Tgt end
+	if now - last_cast_roll.T < 0.008 then
+		if use_cached and S.SilentTgt then return last_cast_roll.Pass, S.SilentTgt end
+		return last_cast_roll.Pass, last_cast_roll.Tgt
+	end
 	local pass = (CFG.Silent.HitChance >= 100) or (math.random(1, 100) <= CFG.Silent.HitChance)
-	local tgt = pass and (use_cached and S.SilentTgt or find_silent_tgt(true)) or nil
+	local tgt = pass and (use_cached and S.SilentTgt or (S.SilentTgt or find_silent_tgt(true))) or nil
 	last_cast_roll.T, last_cast_roll.Pass, last_cast_roll.Tgt = now, pass, tgt
 	return pass, tgt
 end
@@ -1106,6 +1164,7 @@ local function patch_tryshoot_table(shots)
 				if sc.Method == "Hybrid" or sc.Method == "Remote" then
 					local pass, ptgt = sample_silent_shot(true)
 					if pass and ptgt and ptgt.Part then
+						if sc.MagicBullet and ptgt.WallbangMuzzle then s.MuzzlePosition = ptgt.WallbangMuzzle end
 						local ap = resolve_silent_pos(s.MuzzlePosition, ptgt.Part, ptgt.Hum)
 						local dv = ap - s.MuzzlePosition
 						if dv.Magnitude > 0.05 then s.Direction = dv.Unit end
@@ -1124,6 +1183,7 @@ local function patch_tryshoot_table(shots)
 							part = rtgt.Parts[math.random(1, #rtgt.Parts)]
 						end
 						if part and part.Parent then
+							if sc.MagicBullet and rtgt.WallbangMuzzle then s.MuzzlePosition = rtgt.WallbangMuzzle end
 							local ap = resolve_silent_pos(s.MuzzlePosition, part, rtgt.Hum)
 							local dv = ap - s.MuzzlePosition
 							if dv.Magnitude > 0.05 then
@@ -1351,6 +1411,36 @@ local function hide_silent_visuals()
 	SilentD.FOVOut.Visible, SilentD.FOV.Visible, SilentD.SnapOut.Visible, SilentD.Snap.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false, false, false
 end
 
+local function find_wallbang_muzzle(cam, part, mdl)
+	local my_ch = LP and LP.Character
+	local my_hd = my_ch and (my_ch:FindFirstChild("Head") or my_ch:FindFirstChild("HumanoidRootPart"))
+	local base = (my_hd and my_hd:IsA("BasePart")) and my_hd.Position or cam.CFrame.Position
+	if can_see(cam, base, part, mdl) then return nil end
+	local to_tgt = part.Position - base
+	local dist = to_tgt.Magnitude
+	if dist < 0.5 then return nil end
+	local fwd = to_tgt / dist
+	local right = cam.CFrame.RightVector
+	local up = Vector3.new(0, 1, 0)
+	local dirs = {
+		up,
+		right, -right,
+		fwd,
+		(up + right).Unit, (up - right).Unit,
+		(up + fwd).Unit,
+		(fwd + right).Unit, (fwd - right).Unit,
+	}
+	for _, r in ipairs({ 2.5, 5.0, 8.0, 11.5 }) do
+		if r < dist - 0.5 then
+			for _, d in ipairs(dirs) do
+				local probe = base + d * r
+				if can_see(cam, probe, part, mdl) then return probe end
+			end
+		end
+	end
+	return nil
+end
+
 local function update_silent()
 	sync_silent_slot()
 	local cam = Workspace.CurrentCamera
@@ -1367,6 +1457,9 @@ local function update_silent()
 	end
 
 	local tgt = find_silent_tgt(false)
+	if tgt and tgt.Part and sc.MagicBullet then
+		tgt.WallbangMuzzle = find_wallbang_muzzle(cam, tgt.Part, tgt.Model)
+	end
 	S.SilentTgt = tgt
 	if tgt and tgt.Part then
 		local pos = resolve_silent_pos(cam.CFrame.Position, tgt.Part, tgt.Hum)
@@ -2167,7 +2260,8 @@ local function build_ui(destroy_fn)
 	tog(apg, "Magic Bullet (Wallbang)", function() return CFG.Silent.MagicBullet end, function(v) CFG.Silent.MagicBullet = v end)
 	tog(apg, "Silent Team Check", function() return CFG.Silent.TeamCheck end, function(v) CFG.Silent.TeamCheck = v end)
 	tog(apg, "Ignore Hearse Hidden", function() return CFG.Silent.IgnoreHearseHidden end, function(v) CFG.Silent.IgnoreHearseHidden = v end)
-	tog(apg, "Target Border Bots (NPC)", function() return CFG.Silent.TargetNPCs end, function(v) CFG.Silent.TargetNPCs = v end)
+	tog(apg, "Target NPC Bots", function() return CFG.Silent.TargetNPCs end, function(v) CFG.Silent.TargetNPCs = v end)
+	sel(apg, "NPC Bot Filter", { "Border + Jewelry", "All NPCs", "Border Only", "Jewelry Only" }, function() return CFG.Silent.BotFilter end, function(v) CFG.Silent.BotFilter = v end)
 	tog(apg, "Silent Prediction", function() return CFG.Silent.Prediction end, function(v) CFG.Silent.Prediction = v end)
 	sld(apg, "Silent Pred Lead", 0.02, 0.30, 0.02, "s", function() return CFG.Silent.PredictionScale end, function(v) CFG.Silent.PredictionScale = v end)
 	tog(apg, "Show Silent FOV", function() return CFG.Silent.ShowFOV end, function(v) CFG.Silent.ShowFOV = v end)
@@ -2190,10 +2284,11 @@ local function build_ui(destroy_fn)
 	tog(epg, "Team Check", function() return CFG.ESP.TeamCheck end, function(v) CFG.ESP.TeamCheck = v end)
 	tog(epg, "Ignore Hearse Hidden", function() return CFG.ESP.IgnoreHearseHidden end, function(v) CFG.ESP.IgnoreHearseHidden = v end)
 	tog(epg, "Ignore Moderator Hidden", function() return CFG.ESP.IgnoreModeratorHidden end, function(v) CFG.ESP.IgnoreModeratorHidden = v end)
-	hdr_lbl(epg, "Border Bots (NPC)")
-	tog(epg, "Border Bots ESP", function() return CFG.ESP.ShowBorderBots end, function(v) CFG.ESP.ShowBorderBots = v end)
-	tog(epg, "Checkpoint Bots Only", function() return CFG.ESP.BorderBotsOnly end, function(v) CFG.ESP.BorderBotsOnly = v end)
+	hdr_lbl(epg, "NPC Bots (Border / Jewelry)")
+	tog(epg, "Bots ESP", function() return CFG.ESP.ShowBorderBots end, function(v) CFG.ESP.ShowBorderBots = v end)
+	sel(epg, "Bot Filter", { "Border + Jewelry", "All NPCs", "Border Only", "Jewelry Only" }, function() return CFG.ESP.BotFilter end, function(v) CFG.ESP.BotFilter = v end)
 	col_row(epg, "Border Bot Color", function() return CFG.ESP.ColorBorderBot end, function(c) CFG.ESP.ColorBorderBot = c end)
+	col_row(epg, "Jewelry Bot Color", function() return CFG.ESP.ColorJewelryBot end, function(c) CFG.ESP.ColorJewelryBot = c end)
 	hdr_lbl(epg, "Elements")
 	tog(epg, "2D Box", function() return CFG.ESP.ShowBox end, function(v) CFG.ESP.ShowBox = v end)
 	tog(epg, "Skeleton (R15 / R6)", function() return CFG.ESP.ShowSkeleton end, function(v) CFG.ESP.ShowSkeleton = v end)
@@ -2252,6 +2347,12 @@ local function build_ui(destroy_fn)
 	tog(mpg, "Hide Game Reticle", function() return CFG.Crosshair.HideGameReticle end, function(v) CFG.Crosshair.HideGameReticle = v end)
 	col_row(mpg, "Crosshair Color", function() return CFG.Crosshair.Color end, function(c) CFG.Crosshair.Color = c end)
 	col_row(mpg, "Outline Color", function() return CFG.Crosshair.OutlineColor end, function(c) CFG.Crosshair.OutlineColor = c end)
+	hdr_lbl(mpg, "World Camera FOV")
+	tog(mpg, "Override World FOV", function() return CFG.Camera.OverrideFOV end, function(v)
+		CFG.Camera.OverrideFOV = v
+		if not v and Workspace.CurrentCamera then Workspace.CurrentCamera.FieldOfView = 70 end
+	end)
+	sld(mpg, "World FOV", 30, 120, 1, "deg", function() return CFG.Camera.FOV end, function(v) CFG.Camera.FOV = v end)
 	hdr_lbl(mpg, "Mobile & Interface")
 	sld(mpg, "Menu Scale", 0.75, 1.30, 0.05, "x", function() return CFG.Menu.UIScale end, function(v) CFG.Menu.UIScale = v; upd_scale() end)
 	tog(mpg, "Show [OCEL] Toggle Pill", function() return CFG.Menu.ShowTogglePill end, function(v) CFG.Menu.ShowTogglePill = v; if UI.TPill then UI.TPill.Visible = v end end)
@@ -2280,6 +2381,7 @@ local function destroy_all()
 	cleanup_tracers()
 	cleanup_crosshair()
 	cleanup_chams()
+	if CFG.Camera.OverrideFOV and Workspace.CurrentCamera then pcall(function() Workspace.CurrentCamera.FieldOfView = 70 end) end
 	if UI.Gui then pcall(function() UI.Gui:Destroy() end) end
 	if getgenv and getgenv().OcelHub == ctrl then getgenv().OcelHub = nil end
 end

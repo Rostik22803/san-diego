@@ -323,6 +323,7 @@ local AimD = {
 	Dot = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 3.0, Color = Color3.new(1, 1, 1), Transparency = 1, ZIndex = 6 }),
 }
 local rp = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude; rp.IgnoreWater = true
+pcall(function() rp.CollisionGroup = "Bullet" end)
 
 local function can_see(cam, orig, part, ch)
 	local dir = part.Position - orig
@@ -515,8 +516,16 @@ end
 
 local function update_aim_post()
 	local cam = Workspace.CurrentCamera
-	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible = false, false; hide_aim_visuals(); return end
+	if not cam then return end
 	sync_world_fov(false)
+	if S.AimAct and S.AimPos and CFG.Aim.Method == "Camera" and CFG.Aim.Smoothness <= 0.01 then
+		cam.CFrame = CFrame.lookAt(cam.CFrame.Position, S.AimPos)
+	end
+end
+
+local function update_aim_visuals()
+	local cam = Workspace.CurrentCamera
+	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible = false, false; hide_aim_visuals(); return end
 	local ctr = aim_origin(cam)
 	local sf = CFG.Aim.Enabled and CFG.Aim.ShowFOV
 	AimD.FOVOut.Visible, AimD.FOV.Visible = sf and not CFG.Aim.FOVFilled, sf
@@ -526,15 +535,18 @@ local function update_aim_post()
 		AimD.FOV.Transparency = CFG.Aim.FOVFilled and math.min(CFG.Aim.FOVTransparency, 0.25) or CFG.Aim.FOVTransparency
 	end
 
-	if S.AimAct and S.AimPos and CFG.Aim.Method == "Camera" and CFG.Aim.Smoothness <= 0.01 then
-		cam.CFrame = CFrame.lookAt(cam.CFrame.Position, S.AimPos)
-	end
-
-	if CFG.Aim.Enabled and CFG.Aim.ShowSnapline and S.AimPos then
-		local sp, on = cam:WorldToViewportPoint(S.AimPos)
-		local pt = Vector2.new(sp.X, sp.Y)
-		local fd = (pt - ctr).Magnitude
-		if on and sp.Z > 0.2 and fd <= CFG.Aim.FOV then
+	local aim_pos = S.AimPos
+	if CFG.Aim.Enabled and CFG.Aim.ShowSnapline and S.AimPart and S.AimPart.Parent then
+		local rsp, ron = cam:WorldToViewportPoint(S.AimPart.Position)
+		local rfd = (Vector2.new(rsp.X, rsp.Y) - ctr).Magnitude
+		if ron and rsp.Z > 0.2 and rfd <= (CFG.Aim.FOV - 1) then
+			local pos = aim_pos or S.AimPart.Position
+			local sp, on = cam:WorldToViewportPoint(pos)
+			local pt = Vector2.new(sp.X, sp.Y)
+			local fd = (pt - ctr).Magnitude
+			if not (on and sp.Z > 0.2 and fd <= (CFG.Aim.FOV - 1)) then
+				sp, on, pt, fd = rsp, ron, Vector2.new(rsp.X, rsp.Y), rfd
+			end
 			local lcol = S.AimAct and CFG.Aim.FOVColor or Color3.fromRGB(220, 220, 230)
 			local show_line = fd >= 4
 			AimD.SnapOut.Visible, AimD.Snap.Visible = show_line, show_line
@@ -1255,6 +1267,7 @@ local function patch_tryshoot_table(shots)
 			elseif s.MuzzleDirectionUnit ~= nil then
 				local already_hit = (typeof(s.TargetInstance) == "Instance") and (s.TargetCharacter ~= nil or s.NPCId ~= nil)
 				if sc.Method == "Hybrid" and already_hit and typeof(s.BulletImpactPosition) == "Vector3" then
+					if sc.MagicBullet and tgt.WallbangMuzzle then s.MuzzlePosition = tgt.WallbangMuzzle end
 					local dv = s.BulletImpactPosition - s.MuzzlePosition
 					if dv.Magnitude > 0.05 then s.MuzzleDirectionUnit = dv.Unit end
 				elseif sc.Method == "Remote" or (sc.MagicBullet and not already_hit) then
@@ -1349,14 +1362,15 @@ local function install_silent_hooks()
 
 	slot.DynHandler = function(orig_run, orig, vec, params, pierce_fn, rad, viz)
 		local sc = CFG.Silent
-		local out_vec = vec
+		local cast_orig, out_vec = orig, vec
 		local redirected = false
 		if not S.Destroyed and sc.Enabled and (sc.Method == "Hybrid" or sc.Method == "Raycast") then
 			if typeof(orig) == "Vector3" and typeof(vec) == "Vector3" and vec.Magnitude >= 15 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
 				local pass, tgt = sample_silent_shot(false)
 				if pass and tgt and tgt.Part then
-					local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
-					local nv = aim_p - orig
+					if sc.MagicBullet and tgt.WallbangMuzzle then cast_orig = tgt.WallbangMuzzle end
+					local aim_p = resolve_silent_pos(cast_orig, tgt.Part, tgt.Hum)
+					local nv = aim_p - cast_orig
 					if nv.Magnitude > 0.05 then
 						out_vec = nv.Unit * vec.Magnitude
 						redirected = true
@@ -1365,11 +1379,11 @@ local function install_silent_hooks()
 			end
 		end
 		if redirected then in_dyncast_redirect = true end
-		local r1, r2, r3, r4 = orig_run(orig, out_vec, params, pierce_fn, rad, viz)
+		local r1, r2, r3, r4 = orig_run(cast_orig, out_vec, params, pierce_fn, rad, viz)
 		if redirected then in_dyncast_redirect = false end
-		if not S.Destroyed and not slot.Installed and CFG.Tracers.Enabled and typeof(orig) == "Vector3" and typeof(out_vec) == "Vector3" and out_vec.Magnitude >= 15 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
-			local ep = (r1 and r1.Position) or (orig + out_vec)
-			tracer_queue[#tracer_queue + 1] = { From = orig, To = ep }
+		if not S.Destroyed and not slot.Installed and CFG.Tracers.Enabled and typeof(cast_orig) == "Vector3" and typeof(out_vec) == "Vector3" and out_vec.Magnitude >= 15 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
+			local ep = (r1 and r1.Position) or (cast_orig + out_vec)
+			tracer_queue[#tracer_queue + 1] = { From = cast_orig, To = ep }
 		end
 		return r1, r2, r3, r4
 	end
@@ -1494,11 +1508,32 @@ local function hide_silent_visuals()
 	SilentD.FOVOut.Visible, SilentD.FOV.Visible, SilentD.SnapOut.Visible, SilentD.Snap.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false, false, false
 end
 
+local function has_open_los(cam, orig, part, mdl)
+	if not can_see(cam, orig, part, mdl) then return false end
+	local back = orig - part.Position
+	if back.Magnitude < 0.05 then return true end
+	local f = {}; if LP.Character then table.insert(f, LP.Character) end
+	if cam then table.insert(f, cam) end
+	if mdl then table.insert(f, mdl) end
+	rp.FilterDescendantsInstances = f
+	-- Reverse ray rejects origins placed inside solid walls where forward raycast ignores backfaces
+	return Workspace:Raycast(part.Position, back, rp) == nil
+end
+
+local wb_cache = { Part = nil, Base = nil, TgtPos = nil, Pos = nil, T = 0 }
 local function find_wallbang_muzzle(cam, part, mdl)
 	local my_ch = LP and LP.Character
 	local my_hd = my_ch and (my_ch:FindFirstChild("Head") or my_ch:FindFirstChild("HumanoidRootPart"))
 	local base = (my_hd and my_hd:IsA("BasePart")) and my_hd.Position or cam.CFrame.Position
-	if can_see(cam, base, part, mdl) then return nil end
+	if has_open_los(cam, base, part, mdl) then
+		wb_cache.Part = nil
+		return nil
+	end
+	local now = os.clock()
+	if wb_cache.Part == part and wb_cache.Pos and (now - wb_cache.T) < 0.05
+		and (base - wb_cache.Base).Magnitude < 1.2 and (part.Position - wb_cache.TgtPos).Magnitude < 1.2 then
+		return wb_cache.Pos
+	end
 	local to_tgt = part.Position - base
 	local dist = to_tgt.Magnitude
 	if dist < 0.5 then return nil end
@@ -1513,15 +1548,36 @@ local function find_wallbang_muzzle(cam, part, mdl)
 		(up + fwd).Unit,
 		(fwd + right).Unit, (fwd - right).Unit,
 	}
-	for _, r in ipairs({ 2.5, 5.0, 8.0, 11.5 }) do
+	if part.Position.Y < base.Y - 2 then table.insert(dirs, -up) end
+
+	local found = nil
+	for _, r in ipairs({ 3.0, 6.0, 10.0, 15.0, 22.0 }) do
 		if r < dist - 0.5 then
 			for _, d in ipairs(dirs) do
 				local probe = base + d * r
-				if can_see(cam, probe, part, mdl) then return probe end
+				if has_open_los(cam, probe, part, mdl) then found = probe; break end
+			end
+			if found then break end
+		end
+	end
+
+	-- Thick walls / multi-room cover fallback: step along fire line past geometry toward target
+	if not found then
+		for _, frac in ipairs({ 0.30, 0.55, 0.78, 0.92 }) do
+			if dist * frac > 1.5 and dist * (1 - frac) > 0.6 then
+				local probe = base + fwd * (dist * frac)
+				if has_open_los(cam, probe, part, mdl) then found = probe; break end
 			end
 		end
 	end
-	return nil
+	if not found and dist > 2.5 then
+		for _, off in ipairs({ part.Position - fwd * 2.5, (part.Position + Vector3.new(0, 2.8, 0)) - fwd * 1.6 }) do
+			if has_open_los(cam, off, part, mdl) then found = off; break end
+		end
+	end
+
+	wb_cache.Part, wb_cache.Base, wb_cache.TgtPos, wb_cache.Pos, wb_cache.T = part, base, part.Position, found, now
+	return found
 end
 
 local function update_silent()
@@ -1545,16 +1601,16 @@ local function update_silent()
 	end
 	S.SilentTgt = tgt
 	if tgt and tgt.Part then
-		local pos = resolve_silent_pos(cam.CFrame.Position, tgt.Part, tgt.Hum)
-		local sp, on = cam:WorldToViewportPoint(pos)
-		local pt = Vector2.new(sp.X, sp.Y)
-		local fd = (pt - ctr).Magnitude
-		if not (on and sp.Z > 0.2 and fd <= sc.FOV) then
-			sp, on = cam:WorldToViewportPoint(tgt.Part.Position)
-			pt = Vector2.new(sp.X, sp.Y)
-			fd = (pt - ctr).Magnitude
-		end
-		if on and sp.Z > 0.2 and fd <= sc.FOV then
+		local rsp, ron = cam:WorldToViewportPoint(tgt.Part.Position)
+		local rfd = (Vector2.new(rsp.X, rsp.Y) - ctr).Magnitude
+		if ron and rsp.Z > 0.2 and rfd <= (sc.FOV - 1) then
+			local pos = resolve_silent_pos(cam.CFrame.Position, tgt.Part, tgt.Hum)
+			local sp, on = cam:WorldToViewportPoint(pos)
+			local pt = Vector2.new(sp.X, sp.Y)
+			local fd = (pt - ctr).Magnitude
+			if not (on and sp.Z > 0.2 and fd <= (sc.FOV - 1)) then
+				sp, on, pt, fd = rsp, ron, Vector2.new(rsp.X, rsp.Y), rfd
+			end
 			local sl = sc.ShowSnapline and (fd >= 4)
 			SilentD.SnapOut.Visible, SilentD.Snap.Visible = sl, sl
 			if sl then
@@ -2498,4 +2554,4 @@ install_silent_hooks()
 build_ui(destroy_all)
 RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
 RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
-tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then sync_world_fov(false); local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk); update_silent(); update_tracers(clk) end end))
+tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then sync_world_fov(false); update_aim_visuals(); local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk); update_silent(); update_tracers(clk) end end))

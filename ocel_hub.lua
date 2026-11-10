@@ -922,16 +922,45 @@ local function resolve_silent_pos(origin, part, hum)
 	return pos
 end
 
-local inc_rp = RaycastParams.new(); inc_rp.FilterType = Enum.RaycastFilterType.Include; inc_rp.IgnoreWater = true
-local function surface_hit_on_part(origin, aim_pos, part)
+local function obb_hit_on_part(origin, aim_pos, part)
 	local dv = aim_pos - origin
 	if dv.Magnitude < 0.05 then return aim_pos, Vector3.new(0, 1, 0) end
 	local ud = dv.Unit
-	inc_rp.FilterDescendantsInstances = { part }
-	local hit = Workspace:Raycast(origin, ud * (dv.Magnitude + 8), inc_rp)
-	if hit then return hit.Position, hit.Normal end
-	local half = math.min(part.Size.X, part.Size.Y, part.Size.Z) * 0.45
-	return aim_pos - ud * math.min(half, dv.Magnitude * 0.5), -ud
+	local cf, sz = part.CFrame, part.Size * 0.5
+	local rv, uv, fv = cf.RightVector, cf.UpVector, -cf.LookVector
+	local rel = origin - cf.Position
+	local lo = { rel:Dot(rv), rel:Dot(uv), rel:Dot(fv) }
+	local ld = { ud:Dot(rv), ud:Dot(uv), ud:Dot(fv) }
+	local hs = { sz.X, sz.Y, sz.Z }
+	local ax_v = { rv, uv, fv }
+	local tmin, tmax, hit_ax, hit_s = -1e9, 1e9, 2, 1
+	for i = 1, 3 do
+		local o, d, h = lo[i], ld[i], hs[i]
+		if math.abs(d) < 1e-6 then
+			if o < -h or o > h then tmin = 1e9; break end
+		else
+			local t1, t2 = (-h - o) / d, (h - o) / d
+			local s = -1
+			if t1 > t2 then t1, t2, s = t2, t1, 1 end
+			if t1 > tmin then tmin, hit_ax, hit_s = t1, i, s end
+			if t2 < tmax then tmax = t2 end
+			if tmin > tmax then tmin = 1e9; break end
+		end
+	end
+	if tmin > 0 and tmin < 1e8 then
+		return origin + ud * tmin, ax_v[hit_ax] * hit_s
+	end
+	local r = math.min(sz.X, sz.Y, sz.Z) * 0.85
+	return aim_pos - ud * math.min(r, dv.Magnitude * 0.5), -ud
+end
+
+local function collect_tgt_parts(ch)
+	local pool = {}
+	for _, n in ipairs(RND_PARTS) do
+		local p = ch:FindFirstChild(n)
+		if p and p:IsA("BasePart") then table.insert(pool, p) end
+	end
+	return pool
 end
 
 local function find_silent_tgt(for_shot)
@@ -958,7 +987,12 @@ local function find_silent_tgt(for_shot)
 			or fd
 		if score < best_sc then
 			best_sc = score
-			best_tgt = { Model = mdl, Player = pl, Hum = hum, Part = part, Fov = fd, Dist = wd, IsNPC = is_npc }
+			best_tgt = {
+				Model = mdl, Player = pl, Hum = hum, Part = part,
+				Parts = (not for_shot and sc.TargetPart == "Random") and collect_tgt_parts(mdl) or nil,
+				NPCId = (not for_shot and is_npc) and silent_npc_id(part) or nil,
+				Fov = fd, Dist = wd, IsNPC = is_npc,
+			}
 		end
 	end
 
@@ -983,11 +1017,11 @@ local function find_silent_tgt(for_shot)
 end
 
 local last_cast_roll = { T = 0, Pass = false, Tgt = nil }
-local function sample_silent_shot()
+local function sample_silent_shot(use_cached)
 	local now = os.clock()
 	if now - last_cast_roll.T < 0.008 then return last_cast_roll.Pass, last_cast_roll.Tgt end
 	local pass = (CFG.Silent.HitChance >= 100) or (math.random(1, 100) <= CFG.Silent.HitChance)
-	local tgt = pass and find_silent_tgt(true) or nil
+	local tgt = pass and (use_cached and S.SilentTgt or find_silent_tgt(true)) or nil
 	last_cast_roll.T, last_cast_roll.Pass, last_cast_roll.Tgt = now, pass, tgt
 	return pass, tgt
 end
@@ -1013,7 +1047,7 @@ end
 local function is_gun_cast(method, orig, dir, params)
 	if typeof(params) ~= "RaycastParams" then return false end
 	if params.CollisionGroup ~= "Bullet" or params.FilterType ~= Enum.RaycastFilterType.Exclude then return false end
-	if typeof(orig) ~= "Vector3" or typeof(dir) ~= "Vector3" or dir.Magnitude < 25 then return false end
+	if typeof(orig) ~= "Vector3" or typeof(dir) ~= "Vector3" or dir.Magnitude < 15 then return false end
 	if not has_local_char_filter(params) then return false end
 	if method == "Spherecast" then return true end
 	if typeof(debug) == "table" and typeof(debug.info) == "function" then
@@ -1029,18 +1063,19 @@ local function is_gun_cast(method, orig, dir, params)
 end
 
 local in_dyncast_redirect = false
+-- Must stay 100% free of :Method() calls (called from inside __namecall on TryShoot)
 local function patch_tryshoot_table(shots)
 	local sc = CFG.Silent
 	if typeof(shots) ~= "table" or #shots == 0 then return end
-	local tgt = S.SilentTgt or find_silent_tgt(true)
+	local tgt = S.SilentTgt
+	if not tgt or not tgt.Part or not tgt.Part.Parent then return end
 	for i = 1, #shots do
 		local s = shots[i]
 		if typeof(s) == "table" and typeof(s.MuzzlePosition) == "Vector3" then
 			if s.Direction ~= nil and s.BulletImpactPosition == nil then
 				if sc.Method == "Hybrid" or sc.Method == "Remote" then
-					local pass, ptgt = sample_silent_shot()
-					ptgt = pass and (ptgt or tgt) or nil
-					if ptgt and ptgt.Part then
+					local pass, ptgt = sample_silent_shot(true)
+					if pass and ptgt and ptgt.Part then
 						local ap = resolve_silent_pos(s.MuzzlePosition, ptgt.Part, ptgt.Hum)
 						local dv = ap - s.MuzzlePosition
 						if dv.Magnitude > 0.05 then s.Direction = dv.Unit end
@@ -1052,25 +1087,25 @@ local function patch_tryshoot_table(shots)
 					local dv = s.BulletImpactPosition - s.MuzzlePosition
 					if dv.Magnitude > 0.05 then s.MuzzleDirectionUnit = dv.Unit end
 				elseif sc.Method == "Remote" or (sc.MagicBullet and not already_hit) then
-					local pass, rtgt = sample_silent_shot()
-					rtgt = pass and (rtgt or tgt) or nil
-					if rtgt and rtgt.Model then
-						local cam = Workspace.CurrentCamera
-						local ctr = cam and silent_origin(cam) or Vector2.new(0, 0)
-						local part = (sc.TargetPart == "Random" and cam) and pick_part(cam, rtgt.Model, ctr, "Random", sc.FOV) or rtgt.Part
-						if part and part:IsA("BasePart") then
+					local pass, rtgt = sample_silent_shot(true)
+					if pass and rtgt and rtgt.Model then
+						local part = rtgt.Part
+						if sc.TargetPart == "Random" and rtgt.Parts and #rtgt.Parts > 0 then
+							part = rtgt.Parts[math.random(1, #rtgt.Parts)]
+						end
+						if part and part.Parent then
 							local ap = resolve_silent_pos(s.MuzzlePosition, part, rtgt.Hum)
 							local dv = ap - s.MuzzlePosition
 							if dv.Magnitude > 0.05 then
 								local ud = dv.Unit
-								local imp, nrm = surface_hit_on_part(s.MuzzlePosition, ap, part)
+								local imp, nrm = obb_hit_on_part(s.MuzzlePosition, ap, part)
 								s.MuzzleDirectionUnit = ud
 								s.BulletImpactPosition = imp
 								s.Normal = nrm
 								s.TargetInstance = part
 								if rtgt.IsNPC then
 									s.TargetCharacter = nil
-									s.NPCId = silent_npc_id(part)
+									s.NPCId = rtgt.NPCId
 									s.TargetSize = nil
 									s.TargetCFrame = nil
 								else
@@ -1088,21 +1123,32 @@ local function patch_tryshoot_table(shots)
 	end
 end
 
+local function sync_silent_slot()
+	local g = getgenv and getgenv() or _G
+	if g._OcelSilentSlot then
+		g._OcelSilentSlot.Active = (not S.Destroyed and CFG.Silent.Enabled)
+	end
+end
+
 local function install_silent_hooks()
 	local g = getgenv and getgenv() or _G
-	g._OcelSilentSlot = g._OcelSilentSlot or { Installed = false, DynInstalled = false, Handler = nil, DynHandler = nil }
+	g._OcelSilentSlot = g._OcelSilentSlot or { Installed = false, DynInstalled = false, Version = 0, Active = false, Handler = nil, DynHandler = nil }
 	local slot = g._OcelSilentSlot
+	slot.Active = (not S.Destroyed and CFG.Silent.Enabled)
 
 	slot.Handler = function(kind, self, method, old_nc, ...)
 		local sc = CFG.Silent
-		if S.Destroyed or not sc.Enabled then return old_nc(self, ...) end
+		if S.Destroyed or not sc.Enabled then
+			if kind == "Cast" then return old_nc(self, ...) end
+			return
+		end
 
 		if kind == "Cast" then
 			if in_dyncast_redirect or (sc.Method ~= "Hybrid" and sc.Method ~= "Raycast") then return old_nc(self, ...) end
 			if method == "Spherecast" then
 				local orig, rad, dir, params = ...
 				if is_gun_cast(method, orig, dir, params) then
-					local pass, tgt = sample_silent_shot()
+					local pass, tgt = sample_silent_shot(false)
 					if pass and tgt and tgt.Part then
 						local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
 						local nv = aim_p - orig
@@ -1112,7 +1158,7 @@ local function install_silent_hooks()
 			else
 				local orig, dir, params = ...
 				if is_gun_cast(method, orig, dir, params) then
-					local pass, tgt = sample_silent_shot()
+					local pass, tgt = sample_silent_shot(false)
 					if pass and tgt and tgt.Part then
 						local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
 						local nv = aim_p - orig
@@ -1122,21 +1168,15 @@ local function install_silent_hooks()
 			end
 			return old_nc(self, ...)
 		elseif kind == "Remote" then
-			if self.Name ~= "TryShoot" or not self.Parent or self.Parent.Name ~= "GunService" then
-				return old_nc(self, ...)
-			end
-			local shots = ...
-			patch_tryshoot_table(shots)
-			return old_nc(self, shots)
+			patch_tryshoot_table(...)
 		end
-		return old_nc(self, ...)
 	end
 
 	slot.DynHandler = function(orig_run, orig, vec, params, pierce_fn, rad, viz)
 		local sc = CFG.Silent
 		if not S.Destroyed and sc.Enabled and (sc.Method == "Hybrid" or sc.Method == "Raycast") then
-			if typeof(orig) == "Vector3" and typeof(vec) == "Vector3" and vec.Magnitude >= 25 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
-				local pass, tgt = sample_silent_shot()
+			if typeof(orig) == "Vector3" and typeof(vec) == "Vector3" and vec.Magnitude >= 15 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
+				local pass, tgt = sample_silent_shot(false)
 				if pass and tgt and tgt.Part then
 					local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
 					local nv = aim_p - orig
@@ -1152,7 +1192,7 @@ local function install_silent_hooks()
 		return orig_run(orig, vec, params, pierce_fn, rad, viz)
 	end
 
-	-- 1) Direct DynamicCast.Run table hook via getgc (works even without hookmetamethod)
+	-- 1) Direct DynamicCast.Run table hook via getgc (zero __namecall overhead, works without hookmetamethod)
 	if not slot.DynInstalled and typeof(getgc) == "function" then
 		pcall(function()
 			for _, obj in ipairs(getgc(true)) do
@@ -1170,65 +1210,89 @@ local function install_silent_hooks()
 		end)
 	end
 
-	-- 2) __namecall hook for Workspace Cast + GunService.TryShoot Remote
-	if not slot.Installed then
+	-- 2) Safe __namecall hook: zero ':' method calls inside hook, fast-path exit when disabled
+	if not slot.Installed or slot.Version ~= 2 then
 		local wrap = typeof(newcclosure) == "function" and newcclosure or function(f) return f end
+		local setnc = typeof(setnamecallmethod) == "function" and setnamecallmethod or nil
 		local nc_hook = wrap(function(self, ...)
-			local old_fn = slot.OldNC
-			local h = slot.Handler
-			if not h or (checkcaller and checkcaller()) then return old_fn(self, ...) end
-			local m = getnamecallmethod()
-			if typeof(self) == "Instance" then
-				if (self == Workspace or self.ClassName == "Workspace") and (m == "Raycast" or m == "Spherecast") then
-					return h("Cast", self, m, old_fn, ...)
-				elseif ((m == "FireServer" and self:IsA("BaseRemoteEvent")) or (m == "InvokeServer" and self:IsA("RemoteFunction"))) then
-					return h("Remote", self, m, old_fn, ...)
-				end
+			local raw = slot.RawNC or slot.OldNC
+			if not slot.Active or S.Destroyed or (checkcaller and checkcaller()) then
+				return raw(self, ...)
 			end
-			return old_fn(self, ...)
+			local m = getnamecallmethod()
+			if m == "FireServer" or m == "InvokeServer" then
+				if typeof(self) == "Instance" and self.Name == "TryShoot" then
+					local par = self.Parent
+					if par and par.Name == "GunService" then
+						local h = slot.Handler
+						if h then h("Remote", self, m, raw, ...) end
+						if setnc then setnc(m) end
+					end
+				end
+				return raw(self, ...)
+			elseif not slot.DynInstalled and (m == "Raycast" or m == "Spherecast") then
+				if self == Workspace then
+					local h = slot.Handler
+					if h then
+						local r1, r2, r3, r4 = h("Cast", self, m, raw, ...)
+						if setnc then setnc(m) end
+						return r1, r2, r3, r4
+					end
+				end
+				return raw(self, ...)
+			end
+			return raw(self, ...)
 		end)
 
 		if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
+			local prev = nil
 			local ok = pcall(function()
-				slot.OldNC = hookmetamethod(game, "__namecall", nc_hook)
+				prev = hookmetamethod(game, "__namecall", nc_hook)
 			end)
-			if ok and typeof(slot.OldNC) == "function" then slot.Installed = true end
+			if ok and typeof(prev) == "function" then
+				if not slot.RawNC then slot.RawNC = prev end
+				slot.OldNC = slot.RawNC
+				slot.Installed = true
+				slot.Version = 2
+			end
 		elseif typeof(getrawmetatable) == "function" and typeof(setreadonly) == "function" and typeof(getnamecallmethod) == "function" then
+			local prev = nil
 			local ok = pcall(function()
 				local mt = getrawmetatable(game)
-				slot.OldNC = mt.__namecall
+				prev = mt.__namecall
 				setreadonly(mt, false)
 				mt.__namecall = nc_hook
 				setreadonly(mt, true)
 			end)
-			if ok and typeof(slot.OldNC) == "function" then slot.Installed = true end
+			if ok and typeof(prev) == "function" then
+				if not slot.RawNC then slot.RawNC = prev end
+				slot.OldNC = slot.RawNC
+				slot.Installed = true
+				slot.Version = 2
+			end
 		end
 	end
 
-	-- 3) hookfunction fallback for executors without hookmetamethod/getrawmetatable
+	-- 3) hookfunction fallback when neither hookmetamethod nor getrawmetatable worked
 	if not slot.Installed and typeof(hookfunction) == "function" then
 		pcall(function()
 			local wrap = typeof(newcclosure) == "function" and newcclosure or function(f) return f end
 			local r_ev = Instance.new("RemoteEvent")
 			local old_fs
 			old_fs = hookfunction(r_ev.FireServer, wrap(function(self, ...)
-				local h = slot.Handler
-				if h and typeof(self) == "Instance" and (not checkcaller or not checkcaller()) then
-					return h("Remote", self, "FireServer", old_fs, ...)
+				if slot.Active and not S.Destroyed and typeof(self) == "Instance" and self.Name == "TryShoot" and (not checkcaller or not checkcaller()) then
+					local par = self.Parent
+					if par and par.Name == "GunService" then
+						local h = slot.Handler
+						if h then h("Remote", self, "FireServer", old_fs, ...) end
+					end
 				end
 				return old_fs(self, ...)
 			end))
 			r_ev:Destroy()
-			local old_rc
-			old_rc = hookfunction(Workspace.Raycast, wrap(function(self, ...)
-				local h = slot.Handler
-				if h and (self == Workspace or (typeof(self) == "Instance" and self.ClassName == "Workspace")) and (not checkcaller or not checkcaller()) then
-					return h("Cast", self, "Raycast", old_rc, ...)
-				end
-				return old_rc(self, ...)
-			end))
 			slot.Installed = true
 			slot.HookFnMode = true
+			slot.Version = 2
 		end)
 	end
 
@@ -1249,6 +1313,7 @@ local function hide_silent_visuals()
 end
 
 local function update_silent()
+	sync_silent_slot()
 	local cam = Workspace.CurrentCamera
 	local sc = CFG.Silent
 	if not sc.Enabled or not cam then
@@ -1282,6 +1347,7 @@ end
 local function cleanup_silent()
 	local g = getgenv and getgenv() or _G
 	if g._OcelSilentSlot then
+		g._OcelSilentSlot.Active = false
 		g._OcelSilentSlot.Handler = nil
 		g._OcelSilentSlot.DynHandler = nil
 	end
@@ -1975,7 +2041,7 @@ local function build_ui(destroy_fn)
 	col_row(apg, "FOV Color", function() return CFG.Aim.FOVColor end, function(c) CFG.Aim.FOVColor = c end)
 
 	hdr_lbl(apg, "Silent Aim (" .. S.SilentHookMsg .. ")")
-	tog(apg, "Enable Silent Aim", function() return CFG.Silent.Enabled end, function(v) CFG.Silent.Enabled = v end)
+	tog(apg, "Enable Silent Aim", function() return CFG.Silent.Enabled end, function(v) CFG.Silent.Enabled = v; sync_silent_slot() end)
 	sel(apg, "Silent Method", { "Hybrid", "Raycast", "Remote" }, function() return CFG.Silent.Method end, function(v) CFG.Silent.Method = v end)
 	sel(apg, "Silent Bone", { "Head", "UpperTorso", "HumanoidRootPart", "Closest", "Dynamic", "Random" }, function() return CFG.Silent.TargetPart end, function(v) CFG.Silent.TargetPart = v end)
 	sel(apg, "Silent Priority", { "Crosshair", "Distance", "Lowest HP", "Hybrid" }, function() return CFG.Silent.Priority end, function(v) CFG.Silent.Priority = v end)

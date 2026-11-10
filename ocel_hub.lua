@@ -854,7 +854,7 @@ local function adorn_part(p, c, tr, top)
 	end
 end
 
-local function fill_part(p, v)
+local function fill_part(p, v, keep_opaque)
 	CH.AP[p] = true
 	if not CH.OrigP[p] then
 		local s = { M = p.Material, C = p.Color, T = p.Transparency, R = p.Reflectance, CS = p.CastShadow }
@@ -866,7 +866,7 @@ local function fill_part(p, v)
 		if p.Color ~= v.C then p.Color = v.C end
 		if math.abs(p.Reflectance - v.R) > 0.01 then p.Reflectance = v.R end
 		if p.CastShadow ~= false then p.CastShadow = false end
-		local t_tr = v.FT > 0.02 and math.max(CH.OrigP[p].T, v.FT) or CH.OrigP[p].T
+		local t_tr = (not keep_opaque and v.FT > 0.02) and math.max(CH.OrigP[p].T, v.FT) or CH.OrigP[p].T
 		if math.abs(p.Transparency - t_tr) > 0.005 then p.Transparency = t_tr end
 		if CFG.Chams.StripTextures and p:IsA("MeshPart") and p.TextureID ~= "" then p.TextureID = "" end
 	end)
@@ -961,7 +961,7 @@ local function draw_wire_mesh(k, pts, mdl, cfg, clk, ov)
 
 	for _, p in ipairs(pts) do
 		local sz = p.Size
-		if p.Parent and p.Transparency < 0.98 and math.max(sz.X, sz.Y, sz.Z) >= 0.28 then
+		if part_vis(p) and math.max(sz.X, sz.Y, sz.Z) >= 0.28 then
 			if cfg.AlwaysOnTop or can_see(cam, cpos, p, mdl or p) then
 				local shp, cf = part_wire_shape(p), p.CFrame
 				local proj, verts, edges = {}, shp.V, shp.E
@@ -989,14 +989,20 @@ local function draw_wire_mesh(k, pts, mdl, cfg, clk, ov)
 	for i = idx + 1, #pool do pool[i].Visible = false end
 end
 
-local function vpart(i) return i:IsA("BasePart") and i.Name ~= "HumanoidRootPart" and i:GetAttribute("OcelIgnore") ~= true end
+local function vpart(i)
+	return i:IsA("BasePart") and i.Name ~= "HumanoidRootPart" and i.Name ~= "FakeCamera" and i:GetAttribute("OcelIgnore") ~= true
+end
+
+local function part_vis(p)
+	return p and p.Parent and p.Transparency < 0.98 and p.LocalTransparencyModifier < 0.98
+end
 
 local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
-	local m = cfg.Mode
+	local m, is_wpn = cfg.Mode, (k == "Weapon")
 	if m == "Hitboxes" or m == "Boxes" then
 		local v = style_vis(cfg, clk, ov, 1.4)
 		for _, p in ipairs(pts) do
-			if p.Transparency < 0.98 then
+			if part_vis(p) then
 				local pv = v.FLW and style_vis(cfg, clk, ov, PART_PHASE[p.Name] or 1.6) or v
 				box_part(p, pv, cfg.AlwaysOnTop, m == "Hitboxes")
 			end
@@ -1011,10 +1017,15 @@ local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
 	if fl then
 		if v.WR then
 			if not dist or dist <= 650 then draw_wire_mesh(k, pts, mdl, cfg, clk, ov) end
-		elseif cfg.AlwaysOnTop then
+			if is_wpn then
+				for _, p in ipairs(pts) do
+					if part_vis(p) then fill_part(p, v, true) end
+				end
+			end
+		elseif cfg.AlwaysOnTop and not is_wpn then
 			if v.FLW or not mdl or bdg <= 0 then
 				for _, p in ipairs(pts) do
-					if p.Transparency < 0.98 then
+					if part_vis(p) then
 						local pv = v.FLW and style_vis(cfg, clk, ov, PART_PHASE[p.Name] or 1.6) or v
 						adorn_part(p, pv.C, pv.FT, true)
 					end
@@ -1022,25 +1033,27 @@ local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
 			end
 		else
 			if mdl then strip_cl(mdl) end
-			for _, p in ipairs(pts) do
-				if p.Transparency < 0.98 or CH.OrigP[p] then
-					local pv = v.FLW and style_vis(cfg, clk, ov, PART_PHASE[p.Name] or 1.6) or v
-					fill_part(p, pv)
+			for i, p in ipairs(pts) do
+				if part_vis(p) then
+					local ph = PART_PHASE[p.Name] or (is_wpn and ((i % 6) * 0.55) or 1.6)
+					local pv = v.FLW and style_vis(cfg, clk, ov, ph) or v
+					fill_part(p, pv, is_wpn)
 				end
 			end
 		end
 	end
 
-	if out or (fl and cfg.AlwaysOnTop) or (fl and cfg.Style == "ForceField") then
+	local want_hl = out or (not is_wpn and fl and (cfg.AlwaysOnTop or cfg.Style == "ForceField"))
+	if want_hl then
 		if mdl and bdg > 0 then
-			local use_hl_fill = fl and (v.WR or (cfg.AlwaysOnTop and not v.FLW) or cfg.Style == "ForceField")
+			local use_hl_fill = not is_wpn and fl and (v.WR or (cfg.AlwaysOnTop and not v.FLW) or cfg.Style == "ForceField")
 			local hl_ft = use_hl_fill and v.HL_FT or 1
-			local hl_ot = (out or cfg.Style == "ForceField") and v.OT or 1
+			local hl_ot = (out or (not is_wpn and cfg.Style == "ForceField")) and v.OT or 1
 			hl_apply(k, mdl, hl_ft, v.C, hl_ot, v.HL_OC, cfg.AlwaysOnTop)
 			return bdg - 1
 		elseif out then
 			for _, p in ipairs(pts) do
-				if p.Transparency < 0.98 then wire_box(p, v.OC, 0.015, v.C, 1, v.OT) end
+				if part_vis(p) then wire_box(p, v.OC, 0.015, v.C, 1, v.OT) end
 			end
 		end
 	end
@@ -1052,13 +1065,19 @@ local function update_chams(clk)
 	table.clear(CH.AP); table.clear(CH.AH); table.clear(CH.AB); table.clear(CH.AW); table.clear(CH.AAD)
 	table.clear(CH.AC); table.clear(CH.ASA); table.clear(CH.ASM); table.clear(CH.ADT); table.clear(CH.ABC); table.clear(CH.AWL)
 	local bdg, ch = 28, LP.Character
-	local sp, ap, wp, vms = {}, {}, {}, {}
+	local sp, ap, wp_world, wp_vm, vms = {}, {}, {}, {}, {}
+	local tool = ch and ch:FindFirstChildOfClass("Tool") or nil
+	local vm_gun, arms_mdl = nil, nil
 
 	if ch and ch.Parent then
 		for _, c in ipairs(ch:GetChildren()) do
-			if c:IsA("Tool") then for _, d in ipairs(c:GetDescendants()) do if vpart(d) then table.insert(wp, d) end end
-			elseif c:IsA("Accessory") then for _, d in ipairs(c:GetDescendants()) do if vpart(d) then table.insert(sp, d) end end
-			elseif vpart(c) then table.insert(ARMS[c.Name] and ap or sp, c) end
+			if c:IsA("Tool") then
+				for _, d in ipairs(c:GetDescendants()) do if vpart(d) and part_vis(d) then table.insert(wp_world, d) end end
+			elseif c:IsA("Accessory") then
+				for _, d in ipairs(c:GetDescendants()) do if vpart(d) and part_vis(d) then table.insert(sp, d) end end
+			elseif vpart(c) and part_vis(c) then
+				table.insert(ARMS[c.Name] and ap or sp, c)
+			end
 		end
 	end
 	local cam = Workspace.CurrentCamera
@@ -1066,10 +1085,23 @@ local function update_chams(clk)
 		for _, c in ipairs(cam:GetChildren()) do
 			if c:IsA("Model") then
 				local ha = false
+				local ga = c:FindFirstChild("GeneratedArmVisuals")
+				if ga then arms_mdl = ga end
+				if tool and not vm_gun then
+					local gm = c:FindFirstChild(tool.Name)
+					if gm and gm:IsA("Model") then vm_gun = gm end
+				end
 				for _, d in ipairs(c:GetDescendants()) do
-					if vpart(d) then
-						if ARMS[d.Name] then ha = true; table.insert(ap, d)
-						elseif d.Name ~= "Root" and d.Name ~= "Torso" and d.Name ~= "Head" then table.insert(wp, d) end
+					if vpart(d) and part_vis(d) then
+						if ARMS[d.Name] then
+							ha = true; table.insert(ap, d)
+						elseif d.Name ~= "Root" and d.Name ~= "Torso" and d.Name ~= "Head" then
+							table.insert(wp_vm, d)
+							if not vm_gun then
+								local p_mdl = d:FindFirstAncestorOfClass("Model")
+								if p_mdl and p_mdl ~= c and p_mdl ~= ga then vm_gun = p_mdl end
+							end
+						end
 					end
 				end
 				if ha then table.insert(vms, c) end
@@ -1077,18 +1109,20 @@ local function update_chams(clk)
 		end
 	end
 	if not CFG.Chams.Arms.Enabled and CFG.Chams.Self.Enabled and ch then
-		for _, c in ipairs(ch:GetChildren()) do if vpart(c) and ARMS[c.Name] then table.insert(sp, c) end end
+		for _, c in ipairs(ch:GetChildren()) do if vpart(c) and part_vis(c) and ARMS[c.Name] then table.insert(sp, c) end end
 	end
 
 	if CFG.Chams.Self.Enabled and ch and #sp > 0 then
 		bdg = proc_grp("Self", sp, ch, CFG.Chams.Self, clk, nil, bdg, 0)
 	end
 	if CFG.Chams.Arms.Enabled and #ap > 0 then
-		bdg = proc_grp("Arms", ap, vms[1], CFG.Chams.Arms, clk, nil, bdg, 0)
+		local amdl = arms_mdl or (not vm_gun and vms[1] or nil)
+		bdg = proc_grp("Arms", ap, amdl, CFG.Chams.Arms, clk, nil, bdg, 0)
 	end
+	local wp = (#wp_vm > 0) and wp_vm or wp_world
+	local w_mdl = (#wp_vm > 0) and (vm_gun or vms[1]) or tool
 	if CFG.Chams.Weapon.Enabled and #wp > 0 then
-		local wc, tool = CFG.Chams.Weapon, ch and ch:FindFirstChildOfClass("Tool") or nil
-		bdg = proc_grp("Weapon", wp, tool, wc, clk, nil, bdg, 0)
+		bdg = proc_grp("Weapon", wp, w_mdl, CFG.Chams.Weapon, clk, nil, bdg, 0)
 	end
 	if CFG.Chams.Players.Enabled then
 		local pc, cp, list = CFG.Chams.Players, cam and cam.CFrame.Position or Vector3.zero, {}

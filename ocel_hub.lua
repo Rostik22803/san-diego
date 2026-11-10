@@ -879,26 +879,34 @@ local SilentD = {
 	DotOut = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 4.5, Color = Color3.new(0, 0, 0), Transparency = 0.75, ZIndex = 5 }),
 	Dot = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 2.6, Color = CFG.Silent.FOVColor, Transparency = 1, ZIndex = 6 }),
 }
-local npc_ctrl_mod, npc_ctrl_tried = nil, false
+local npc_entity_map, npc_map_scanned = nil, false
 local function silent_npc_id(part)
 	if not part or not part:IsA("BasePart") then return nil end
-	if not npc_ctrl_tried then
-		npc_ctrl_tried = true
+	local aid = part:GetAttribute("NPCId") or (part.Parent and part.Parent:GetAttribute("NPCId"))
+	if typeof(aid) == "number" and aid ~= 0 then return aid end
+	if not npc_map_scanned and typeof(getgc) == "function" then
+		npc_map_scanned = true
 		pcall(function()
-			local cm = ReplicatedStorage:FindFirstChild("ClientModules")
-			local m = cm and cm:FindFirstChild("NPCController")
-			if m then npc_ctrl_mod = require(m) end
+			for _, obj in ipairs(getgc(true)) do
+				if typeof(obj) == "table" then
+					local eop = rawget(obj, "EntityOfPart")
+					if typeof(eop) == "table" and next(eop) ~= nil then
+						npc_entity_map = eop
+						break
+					end
+				end
+			end
 		end)
 	end
-	if npc_ctrl_mod and typeof(npc_ctrl_mod.GetEntityFromPart) == "function" then
-		local ok, id = pcall(function() return npc_ctrl_mod:GetEntityFromPart(part) end)
-		if ok and typeof(id) == "number" and id ~= 0 then return id end
+	if npc_entity_map then
+		local id = npc_entity_map[part]
+		if typeof(id) == "number" and id ~= 0 then return id end
 	end
 	return nil
 end
 
 local function silent_origin(cam)
-	if UserInputService.MouseBehavior == Enum.MouseBehavior.Default and UserInputService.PreferredInput ~= Enum.PreferredInput.Touch then
+	if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter and UserInputService.PreferredInput ~= Enum.PreferredInput.Touch then
 		return UserInputService:GetMouseLocation()
 	end
 	return cam.ViewportSize * 0.5
@@ -912,6 +920,18 @@ local function resolve_silent_pos(origin, part, hum)
 		pos = pos + vel * CFG.Silent.PredictionScale
 	end
 	return pos
+end
+
+local inc_rp = RaycastParams.new(); inc_rp.FilterType = Enum.RaycastFilterType.Include; inc_rp.IgnoreWater = true
+local function surface_hit_on_part(origin, aim_pos, part)
+	local dv = aim_pos - origin
+	if dv.Magnitude < 0.05 then return aim_pos, Vector3.new(0, 1, 0) end
+	local ud = dv.Unit
+	inc_rp.FilterDescendantsInstances = { part }
+	local hit = Workspace:Raycast(origin, ud * (dv.Magnitude + 8), inc_rp)
+	if hit then return hit.Position, hit.Normal end
+	local half = math.min(part.Size.X, part.Size.Y, part.Size.Z) * 0.45
+	return aim_pos - ud * math.min(half, dv.Magnitude * 0.5), -ud
 end
 
 local function find_silent_tgt(for_shot)
@@ -965,21 +985,28 @@ end
 local last_cast_roll = { T = 0, Pass = false, Tgt = nil }
 local function sample_silent_shot()
 	local now = os.clock()
-	if now - last_cast_roll.T < 0.006 then return last_cast_roll.Pass, last_cast_roll.Tgt end
+	if now - last_cast_roll.T < 0.008 then return last_cast_roll.Pass, last_cast_roll.Tgt end
 	local pass = (CFG.Silent.HitChance >= 100) or (math.random(1, 100) <= CFG.Silent.HitChance)
 	local tgt = pass and find_silent_tgt(true) or nil
 	last_cast_roll.T, last_cast_roll.Pass, last_cast_roll.Tgt = now, pass, tgt
 	return pass, tgt
 end
 
+local function list_has_inst(list, item)
+	if typeof(list) ~= "table" then return false end
+	for i = 1, #list do
+		if list[i] == item then return true end
+	end
+	return false
+end
+
 local function has_local_char_filter(params)
 	local my_ch = LP and LP.Character
 	if not my_ch then return false end
-	local list = params.FilterDescendantsInstances
-	if typeof(list) ~= "table" then return false end
-	for i = 1, #list do
-		if list[i] == my_ch then return true end
-	end
+	local ok1, f1 = pcall(function() return params.FilterDescendantsInstances end)
+	if ok1 and list_has_inst(f1, my_ch) then return true end
+	local ok2, f2 = pcall(function() return params.ExcludeInstances end)
+	if ok2 and list_has_inst(f2, my_ch) then return true end
 	return false
 end
 
@@ -988,25 +1015,82 @@ local function is_gun_cast(method, orig, dir, params)
 	if params.CollisionGroup ~= "Bullet" or params.FilterType ~= Enum.RaycastFilterType.Exclude then return false end
 	if typeof(orig) ~= "Vector3" or typeof(dir) ~= "Vector3" or dir.Magnitude < 25 then return false end
 	if not has_local_char_filter(params) then return false end
-	-- Spherecast in bullet path only happens in DynamicCast (CastShot), never camera aim/scope probes
 	if method == "Spherecast" then return true end
 	if typeof(debug) == "table" and typeof(debug.info) == "function" then
-		local saw_script = false
 		for lvl = 2, 6 do
 			local src = debug.info(lvl, "s")
 			if not src then break end
-			if #src > 3 and src ~= "[C]" then saw_script = true end
 			if src:find("DynamicCast", 1, true) then return true end
+			if lvl <= 3 and (src:find("Aim", 1, true) or src:find("UpdateScope", 1, true)) then return false end
 		end
-		if saw_script then return false end
 	end
 	local cam = Workspace.CurrentCamera
-	return cam ~= nil and (orig - cam.CFrame.Position).Magnitude > 0.85
+	return cam ~= nil and (orig - cam.CFrame.Position).Magnitude > 0.75
+end
+
+local in_dyncast_redirect = false
+local function patch_tryshoot_table(shots)
+	local sc = CFG.Silent
+	if typeof(shots) ~= "table" or #shots == 0 then return end
+	local tgt = S.SilentTgt or find_silent_tgt(true)
+	for i = 1, #shots do
+		local s = shots[i]
+		if typeof(s) == "table" and typeof(s.MuzzlePosition) == "Vector3" then
+			if s.Direction ~= nil and s.BulletImpactPosition == nil then
+				if sc.Method == "Hybrid" or sc.Method == "Remote" then
+					local pass, ptgt = sample_silent_shot()
+					ptgt = pass and (ptgt or tgt) or nil
+					if ptgt and ptgt.Part then
+						local ap = resolve_silent_pos(s.MuzzlePosition, ptgt.Part, ptgt.Hum)
+						local dv = ap - s.MuzzlePosition
+						if dv.Magnitude > 0.05 then s.Direction = dv.Unit end
+					end
+				end
+			elseif s.MuzzleDirectionUnit ~= nil then
+				local already_hit = (typeof(s.TargetInstance) == "Instance") and (s.TargetCharacter ~= nil or s.NPCId ~= nil)
+				if sc.Method == "Hybrid" and already_hit and typeof(s.BulletImpactPosition) == "Vector3" then
+					local dv = s.BulletImpactPosition - s.MuzzlePosition
+					if dv.Magnitude > 0.05 then s.MuzzleDirectionUnit = dv.Unit end
+				elseif sc.Method == "Remote" or (sc.MagicBullet and not already_hit) then
+					local pass, rtgt = sample_silent_shot()
+					rtgt = pass and (rtgt or tgt) or nil
+					if rtgt and rtgt.Model then
+						local cam = Workspace.CurrentCamera
+						local ctr = cam and silent_origin(cam) or Vector2.new(0, 0)
+						local part = (sc.TargetPart == "Random" and cam) and pick_part(cam, rtgt.Model, ctr, "Random", sc.FOV) or rtgt.Part
+						if part and part:IsA("BasePart") then
+							local ap = resolve_silent_pos(s.MuzzlePosition, part, rtgt.Hum)
+							local dv = ap - s.MuzzlePosition
+							if dv.Magnitude > 0.05 then
+								local ud = dv.Unit
+								local imp, nrm = surface_hit_on_part(s.MuzzlePosition, ap, part)
+								s.MuzzleDirectionUnit = ud
+								s.BulletImpactPosition = imp
+								s.Normal = nrm
+								s.TargetInstance = part
+								if rtgt.IsNPC then
+									s.TargetCharacter = nil
+									s.NPCId = silent_npc_id(part)
+									s.TargetSize = nil
+									s.TargetCFrame = nil
+								else
+									s.TargetCharacter = rtgt.Model
+									s.NPCId = nil
+									s.TargetSize = part.Size
+									s.TargetCFrame = part.CFrame
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
 end
 
 local function install_silent_hooks()
 	local g = getgenv and getgenv() or _G
-	g._OcelSilentSlot = g._OcelSilentSlot or { Installed = false, Handler = nil }
+	g._OcelSilentSlot = g._OcelSilentSlot or { Installed = false, DynInstalled = false, Handler = nil, DynHandler = nil }
 	local slot = g._OcelSilentSlot
 
 	slot.Handler = function(kind, self, method, old_nc, ...)
@@ -1014,7 +1098,7 @@ local function install_silent_hooks()
 		if S.Destroyed or not sc.Enabled then return old_nc(self, ...) end
 
 		if kind == "Cast" then
-			if sc.Method ~= "Hybrid" and sc.Method ~= "Raycast" then return old_nc(self, ...) end
+			if in_dyncast_redirect or (sc.Method ~= "Hybrid" and sc.Method ~= "Raycast") then return old_nc(self, ...) end
 			if method == "Spherecast" then
 				local orig, rad, dir, params = ...
 				if is_gun_cast(method, orig, dir, params) then
@@ -1042,106 +1126,121 @@ local function install_silent_hooks()
 				return old_nc(self, ...)
 			end
 			local shots = ...
-			if typeof(shots) ~= "table" or #shots == 0 then return old_nc(self, ...) end
-			local tgt = S.SilentTgt or find_silent_tgt(true)
-			for i = 1, #shots do
-				local s = shots[i]
-				if typeof(s) == "table" and typeof(s.MuzzlePosition) == "Vector3" then
-					if s.Direction ~= nil and s.BulletImpactPosition == nil then
-						-- Projectile shot: always align server direction when Hybrid or Remote
-						if (sc.Method == "Hybrid" or sc.Method == "Remote") then
-							local pass, ptgt = sample_silent_shot()
-							ptgt = pass and (ptgt or tgt) or nil
-							if ptgt and ptgt.Part then
-								local ap = resolve_silent_pos(s.MuzzlePosition, ptgt.Part, ptgt.Hum)
-								local dv = ap - s.MuzzlePosition
-								if dv.Magnitude > 0.05 then s.Direction = dv.Unit end
-							end
-						end
-					elseif s.MuzzleDirectionUnit ~= nil then
-						local already_hit = (typeof(s.TargetInstance) == "Instance") and (s.TargetCharacter ~= nil or s.NPCId ~= nil)
-						if sc.Method == "Hybrid" and already_hit and typeof(s.BulletImpactPosition) == "Vector3" then
-							local dv = s.BulletImpactPosition - s.MuzzlePosition
-							if dv.Magnitude > 0.05 then s.MuzzleDirectionUnit = dv.Unit end
-						elseif sc.Method == "Remote" or (sc.MagicBullet and not already_hit) then
-							local pass, rtgt = sample_silent_shot()
-							rtgt = pass and (rtgt or tgt) or nil
-							if rtgt and rtgt.Model then
-								local cam = Workspace.CurrentCamera
-								local ctr = cam and silent_origin(cam) or Vector2.new(0, 0)
-								local part = (sc.TargetPart == "Random" and cam) and pick_part(cam, rtgt.Model, ctr, "Random", sc.FOV) or rtgt.Part
-								if part and part:IsA("BasePart") then
-									local ap = resolve_silent_pos(s.MuzzlePosition, part, rtgt.Hum)
-									local dv = ap - s.MuzzlePosition
-									if dv.Magnitude > 0.05 then
-										local ud = dv.Unit
-										s.MuzzleDirectionUnit = ud
-										s.BulletImpactPosition = ap
-										s.Normal = -ud
-										s.TargetInstance = part
-										if rtgt.IsNPC then
-											s.TargetCharacter = nil
-											s.NPCId = silent_npc_id(part)
-											s.TargetSize = nil
-											s.TargetCFrame = nil
-										else
-											s.TargetCharacter = rtgt.Model
-											s.NPCId = nil
-											s.TargetSize = part.Size
-											s.TargetCFrame = part.CFrame
-										end
-									end
-								end
-							end
-						end
-					end
-				end
-			end
+			patch_tryshoot_table(shots)
 			return old_nc(self, shots)
 		end
 		return old_nc(self, ...)
 	end
 
-	if slot.Installed then
-		S.SilentHooked, S.SilentHookMsg = true, "Hooked"
-		return
+	slot.DynHandler = function(orig_run, orig, vec, params, pierce_fn, rad, viz)
+		local sc = CFG.Silent
+		if not S.Destroyed and sc.Enabled and (sc.Method == "Hybrid" or sc.Method == "Raycast") then
+			if typeof(orig) == "Vector3" and typeof(vec) == "Vector3" and vec.Magnitude >= 25 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
+				local pass, tgt = sample_silent_shot()
+				if pass and tgt and tgt.Part then
+					local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
+					local nv = aim_p - orig
+					if nv.Magnitude > 0.05 then
+						in_dyncast_redirect = true
+						local r1, r2, r3, r4 = orig_run(orig, nv.Unit * vec.Magnitude, params, pierce_fn, rad, viz)
+						in_dyncast_redirect = false
+						return r1, r2, r3, r4
+					end
+				end
+			end
+		end
+		return orig_run(orig, vec, params, pierce_fn, rad, viz)
 	end
 
-	local wrap = typeof(newcclosure) == "function" and newcclosure or function(f) return f end
-	local nc_hook = wrap(function(self, ...)
-		local old_fn = slot.OldNC
-		local h = slot.Handler
-		if not h or (checkcaller and checkcaller()) then return old_fn(self, ...) end
-		local m = getnamecallmethod()
-		if self == Workspace and (m == "Raycast" or m == "Spherecast") then
-			return h("Cast", self, m, old_fn, ...)
-		elseif m == "FireServer" and typeof(self) == "Instance" and self.ClassName == "RemoteEvent" then
-			return h("Remote", self, m, old_fn, ...)
-		end
-		return old_fn(self, ...)
-	end)
+	-- 1) Direct DynamicCast.Run table hook via getgc (works even without hookmetamethod)
+	if not slot.DynInstalled and typeof(getgc) == "function" then
+		pcall(function()
+			for _, obj in ipairs(getgc(true)) do
+				if typeof(obj) == "table" and rawget(obj, "MAX_PIERCE_DEPTH") == 5 and typeof(rawget(obj, "IsShapecast")) == "function" and typeof(rawget(obj, "Run")) == "function" then
+					local orig_run = rawget(obj, "Run")
+					obj.Run = function(orig, vec, params, pierce_fn, rad, viz)
+						local dh = slot.DynHandler
+						if dh then return dh(orig_run, orig, vec, params, pierce_fn, rad, viz) end
+						return orig_run(orig, vec, params, pierce_fn, rad, viz)
+					end
+					slot.DynInstalled = true
+					break
+				end
+			end
+		end)
+	end
 
-	if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
-		local ok, err = pcall(function()
-			slot.OldNC = hookmetamethod(game, "__namecall", nc_hook)
+	-- 2) __namecall hook for Workspace Cast + GunService.TryShoot Remote
+	if not slot.Installed then
+		local wrap = typeof(newcclosure) == "function" and newcclosure or function(f) return f end
+		local nc_hook = wrap(function(self, ...)
+			local old_fn = slot.OldNC
+			local h = slot.Handler
+			if not h or (checkcaller and checkcaller()) then return old_fn(self, ...) end
+			local m = getnamecallmethod()
+			if typeof(self) == "Instance" then
+				if (self == Workspace or self.ClassName == "Workspace") and (m == "Raycast" or m == "Spherecast") then
+					return h("Cast", self, m, old_fn, ...)
+				elseif ((m == "FireServer" and self:IsA("BaseRemoteEvent")) or (m == "InvokeServer" and self:IsA("RemoteFunction"))) then
+					return h("Remote", self, m, old_fn, ...)
+				end
+			end
+			return old_fn(self, ...)
 		end)
-		if ok and typeof(slot.OldNC) == "function" then
-			slot.Installed, S.SilentHooked, S.SilentHookMsg = true, true, "Hooked"
-			return
+
+		if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
+			local ok = pcall(function()
+				slot.OldNC = hookmetamethod(game, "__namecall", nc_hook)
+			end)
+			if ok and typeof(slot.OldNC) == "function" then slot.Installed = true end
+		elseif typeof(getrawmetatable) == "function" and typeof(setreadonly) == "function" and typeof(getnamecallmethod) == "function" then
+			local ok = pcall(function()
+				local mt = getrawmetatable(game)
+				slot.OldNC = mt.__namecall
+				setreadonly(mt, false)
+				mt.__namecall = nc_hook
+				setreadonly(mt, true)
+			end)
+			if ok and typeof(slot.OldNC) == "function" then slot.Installed = true end
 		end
-		S.SilentHookMsg = "Err: " .. tostring(err):sub(1, 24)
-	elseif typeof(getrawmetatable) == "function" and typeof(setreadonly) == "function" and typeof(getnamecallmethod) == "function" then
-		local ok = pcall(function()
-			local mt = getrawmetatable(game)
-			slot.OldNC = mt.__namecall
-			setreadonly(mt, false)
-			mt.__namecall = nc_hook
-			setreadonly(mt, true)
+	end
+
+	-- 3) hookfunction fallback for executors without hookmetamethod/getrawmetatable
+	if not slot.Installed and typeof(hookfunction) == "function" then
+		pcall(function()
+			local wrap = typeof(newcclosure) == "function" and newcclosure or function(f) return f end
+			local r_ev = Instance.new("RemoteEvent")
+			local old_fs
+			old_fs = hookfunction(r_ev.FireServer, wrap(function(self, ...)
+				local h = slot.Handler
+				if h and typeof(self) == "Instance" and (not checkcaller or not checkcaller()) then
+					return h("Remote", self, "FireServer", old_fs, ...)
+				end
+				return old_fs(self, ...)
+			end))
+			r_ev:Destroy()
+			local old_rc
+			old_rc = hookfunction(Workspace.Raycast, wrap(function(self, ...)
+				local h = slot.Handler
+				if h and (self == Workspace or (typeof(self) == "Instance" and self.ClassName == "Workspace")) and (not checkcaller or not checkcaller()) then
+					return h("Cast", self, "Raycast", old_rc, ...)
+				end
+				return old_rc(self, ...)
+			end))
+			slot.Installed = true
+			slot.HookFnMode = true
 		end)
-		if ok and typeof(slot.OldNC) == "function" then slot.Installed, S.SilentHooked, S.SilentHookMsg = true, true, "Hooked (MT)"; return end
-		S.SilentHookMsg = "MT Locked"
+	end
+
+	S.SilentHooked = slot.Installed or slot.DynInstalled
+	if slot.Installed and slot.DynInstalled then
+		S.SilentHookMsg = slot.HookFnMode and "HF + DynCast" or "NC + DynCast"
+	elseif slot.Installed then
+		S.SilentHookMsg = slot.HookFnMode and "Hooked HF" or "Hooked NC"
+	elseif slot.DynInstalled then
+		S.SilentHookMsg = "DynCast Only"
 	else
-		S.SilentHookMsg = "No hookmetamethod"
+		S.SilentHookMsg = "Unsupported"
 	end
 end
 
@@ -1182,7 +1281,10 @@ end
 
 local function cleanup_silent()
 	local g = getgenv and getgenv() or _G
-	if g._OcelSilentSlot then g._OcelSilentSlot.Handler = nil end
+	if g._OcelSilentSlot then
+		g._OcelSilentSlot.Handler = nil
+		g._OcelSilentSlot.DynHandler = nil
+	end
 	for _, d in pairs(SilentD) do pcall(function() d:Remove() end) end
 end
 

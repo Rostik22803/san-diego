@@ -1053,7 +1053,9 @@ local function vpart_car(p)
 	if p:IsA("Seat") or p:IsA("VehicleSeat") then return false end
 	local par = p.Parent
 	if par and (par.Name == "Colliders" or par.Name == "Hitboxes") then return false end
-	return part_vis(p)
+	if p:FindFirstChild("LightAttachment") then return false end
+	local orig = CH.OrigP[p]
+	return (orig and orig.T < 0.98) or (p.Parent ~= nil and p.Transparency < 0.98)
 end
 
 local function is_vehicle_model(m)
@@ -1139,7 +1141,7 @@ local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
 	if m == "Hitboxes" or m == "Boxes" then
 		local v = style_vis(cfg, clk, ov, 1.4)
 		for _, p in ipairs(pts) do
-			if part_vis(p) then
+			if is_car or part_vis(p) then
 				local pv = v.FLW and style_vis(cfg, clk, ov, PART_PHASE[p.Name] or 1.6) or v
 				box_part(p, pv, cfg.AlwaysOnTop, m == "Hitboxes")
 			end
@@ -1151,15 +1153,38 @@ local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
 	local out = (m == "Outline" or m == "Outline + Fill")
 	local v = style_vis(cfg, clk, ov, 1.4)
 
+	-- Car chams: never mutate BaseParts alongside Highlight (prevents Highlight cache rebuild flicker)
+	if is_car then
+		if fl and v.WR then
+			if not dist or dist <= 650 then draw_wire_mesh(k, pts, mdl, cfg, clk, ov) end
+			return bdg
+		end
+		local use_hl = out or (fl and (cfg.AlwaysOnTop or cfg.Style == "ForceField"))
+		if use_hl and mdl and bdg > 0 then
+			local hl_ft = fl and math.clamp(v.FT, 0.08, 0.92) or 1
+			local hl_ot = (out or cfg.Style == "ForceField") and v.OT or 1
+			hl_apply(k, mdl, hl_ft, v.C, hl_ot, cfg.OutlineColor, cfg.AlwaysOnTop)
+			return bdg - 1
+		end
+		if fl then
+			for _, p in ipairs(pts) do
+				local ph = (p.Position.X + p.Position.Z) * 0.25
+				local pv = v.FLW and style_vis(cfg, clk, ov, ph) or v
+				fill_part(p, pv, true)
+			end
+		end
+		return bdg
+	end
+
 	if fl then
 		if v.WR then
 			if not dist or dist <= 650 then draw_wire_mesh(k, pts, mdl, cfg, clk, ov) end
-			if is_wpn or is_car then
+			if is_wpn then
 				for _, p in ipairs(pts) do
 					if part_vis(p) then fill_part(p, v, true) end
 				end
 			end
-		elseif cfg.AlwaysOnTop and not is_wpn and not is_car then
+		elseif cfg.AlwaysOnTop and not is_wpn then
 			if v.FLW or not mdl or bdg <= 0 then
 				for _, p in ipairs(pts) do
 					if part_vis(p) then
@@ -1169,12 +1194,12 @@ local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
 				end
 			end
 		else
-			if mdl and not is_car then strip_cl(mdl) end
+			if mdl then strip_cl(mdl) end
 			for i, p in ipairs(pts) do
 				if part_vis(p) then
-					local ph = PART_PHASE[p.Name] or ((is_wpn or is_car) and ((i % 8) * 0.45) or 1.6)
+					local ph = PART_PHASE[p.Name] or (is_wpn and ((i % 6) * 0.55) or 1.6)
 					local pv = v.FLW and style_vis(cfg, clk, ov, ph) or v
-					fill_part(p, pv, is_wpn or is_car)
+					fill_part(p, pv, is_wpn)
 				end
 			end
 		end
@@ -1183,8 +1208,8 @@ local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
 	local want_hl = out or (not is_wpn and fl and (cfg.AlwaysOnTop or cfg.Style == "ForceField"))
 	if want_hl then
 		if mdl and bdg > 0 then
-			local use_hl_fill = not is_wpn and fl and (v.WR or (cfg.AlwaysOnTop and (is_car or not v.FLW)) or cfg.Style == "ForceField")
-			local hl_ft = use_hl_fill and (is_car and cfg.AlwaysOnTop and math.clamp(v.FT, 0.08, 0.92) or v.HL_FT) or 1
+			local use_hl_fill = not is_wpn and fl and (v.WR or (cfg.AlwaysOnTop and not v.FLW) or cfg.Style == "ForceField")
+			local hl_ft = use_hl_fill and v.HL_FT or 1
 			local hl_ot = (out or (not is_wpn and cfg.Style == "ForceField")) and v.OT or 1
 			hl_apply(k, mdl, hl_ft, v.C, hl_ot, v.HL_OC, cfg.AlwaysOnTop)
 			return bdg - 1

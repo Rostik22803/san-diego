@@ -1,0 +1,929 @@
+-- language: Luau, file: ocel_hub.lua, target: Roblox (San Diego / Mobile & PC)
+-- Ocel-Hub: Monochrome Mobile UI, Aimbot, San Diego ESP, Multi-Style Chams (Players, Self, Arms, Weapon)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local CoreGui = game:GetService("CoreGui")
+local LP = Players.LocalPlayer
+
+if getgenv and getgenv().OcelHub then pcall(function() getgenv().OcelHub:Destroy() end) end
+
+local CFG = {
+	Menu = { Open = true, ToggleKey = Enum.KeyCode.F3, ShowTogglePill = true, UIScale = 1.0 },
+	Aim = {
+		Enabled = false, Activation = "Button (Toggle)", ShowAimButton = true, Method = "Camera",
+		TargetPart = "Head", Priority = "Crosshair", FOV = 130, ShowFOV = true, FOVFilled = false,
+		FOVTransparency = 0.75, FOVThickness = 1.5, FOVColor = Color3.new(1, 1, 1),
+		Smoothness = 0.35, Prediction = false, PredictionScale = 0.12, WallCheck = true,
+		TeamCheck = false, AliveCheck = true, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
+		MaxDistance = 800, StickyTarget = true, ShowSnapline = true,
+	},
+	ESP = {
+		Enabled = true, MaxDistance = 1500, TeamCheck = false, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
+		ShowBox = true, BoxOutline = true, BoxThickness = 1, ShowSkeleton = true, SkeletonOutline = true,
+		SkeletonThickness = 1.5, ShowHeadCircle = true, ShowHealthBar = true, ShowName = true,
+		ShowDistance = true, ShowTeamTag = true, ShowWanted = true, ShowTracers = false, TracerOrigin = "Bottom",
+		TextSize = 13, ColorUseTeam = true, ColorWantedOverride = true,
+		ColorDefault = Color3.new(1, 1, 1), ColorWanted = Color3.fromRGB(255, 70, 70),
+		ColorDetained = Color3.fromRGB(255, 195, 60), ColorOutline = Color3.new(0, 0, 0),
+	},
+	Chams = {
+		FlowSpeed = 1.6, StripTextures = true,
+		Players = { Enabled = false, Mode = "Outline + Fill", Style = "Glossy Flow", Color = Color3.new(1, 1, 1), OutlineColor = Color3.fromRGB(18, 18, 22), FillTransparency = 0.35, OutlineTransparency = 0, AlwaysOnTop = true, TeamCheck = false, UseTeamColor = false },
+		Self = { Enabled = false, Mode = "Fill", Style = "Water Flow", Color = Color3.fromRGB(215, 225, 255), OutlineColor = Color3.new(1, 1, 1), FillTransparency = 0.25, OutlineTransparency = 0, AlwaysOnTop = false },
+		Arms = { Enabled = false, Mode = "Outline + Fill", Style = "Glossy Flow", Color = Color3.new(1, 1, 1), OutlineColor = Color3.fromRGB(15, 15, 18), FillTransparency = 0.2, OutlineTransparency = 0, AlwaysOnTop = false },
+		Weapon = { Enabled = false, Mode = "Outline + Fill", Style = "Wireframe", Color = Color3.new(1, 1, 1), OutlineColor = Color3.new(1, 1, 1), FillTransparency = 0.25, OutlineTransparency = 0, AlwaysOnTop = false },
+	},
+}
+
+local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, Tab = "AIM", ChamTab = "Players", Scroll = nil }
+local function tc(c) if c then table.insert(S.Conns, c) end return c end
+local function drw(k, p)
+	if not Drawing or not Drawing.new then local st = { Visible = false }; function st:Remove() end; return st end
+	local ok, o = pcall(Drawing.new, k)
+	if not ok or not o then local st = { Visible = false }; function st:Remove() end; return st end
+	for a, b in pairs(p) do pcall(function() o[a] = b end) end
+	return o
+end
+local function gui_root()
+	if typeof(gethui) == "function" then local ok, h = pcall(gethui); if ok and h then return h end end
+	if pcall(function() return CoreGui.Name end) then return CoreGui end
+	return LP:WaitForChild("PlayerGui")
+end
+
+-- San Diego / Rig Helpers
+local R15 = { "Head", "UpperTorso", "LowerTorso", "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }
+local R6 = { "Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }
+local ARMS = { ["Left Arm"] = true, ["Right Arm"] = true, LeftUpperArm = true, LeftLowerArm = true, LeftHand = true, RightUpperArm = true, RightLowerArm = true, RightHand = true }
+
+local function alive(ch, hum)
+	return ch and ch.Parent and hum and hum.Parent and hum.Health > 0 and hum:GetAttribute("Dead") ~= true and hum:GetState() ~= Enum.HumanoidStateType.Dead
+end
+local function wanted_stars(pl)
+	local r = pl:GetAttribute("WantedLevel")
+	if typeof(r) ~= "number" or r <= 0 then return 0 end
+	return math.clamp(math.ceil(math.clamp(math.round(r), 0, 1000) / 200), 0, 5)
+end
+local function esp_col(pl, ch)
+	if CFG.ESP.ColorWantedOverride and wanted_stars(pl) > 0 then return CFG.ESP.ColorWanted end
+	if ch:GetAttribute("IsDetained") == true or ch:GetAttribute("DetainedByUserId") ~= nil then return CFG.ESP.ColorDetained end
+	if CFG.ESP.ColorUseTeam and pl.Team then return pl.Team.TeamColor.Color end
+	return CFG.ESP.ColorDefault
+end
+local function ignored(pl, tc_on, hc_on, mc_on)
+	if tc_on and LP.Team ~= nil and pl.Team == LP.Team then return true end
+	if hc_on and pl:GetAttribute("HearseCoffinHidden") == true then return true end
+	if mc_on and (pl:GetAttribute("ModeratorHidden") == true or pl:GetAttribute("ModeratorInvisible") == true) then return true end
+	return false
+end
+
+-- Monochrome Mobile UI
+local TH = {
+	Bg = Color3.fromRGB(10, 10, 12), Panel = Color3.fromRGB(16, 16, 19), Card = Color3.fromRGB(22, 22, 26),
+	Border = Color3.fromRGB(54, 54, 62), BorderHi = Color3.fromRGB(235, 235, 240),
+	Accent = Color3.new(1, 1, 1), AccentTxt = Color3.fromRGB(10, 10, 12),
+	Txt = Color3.fromRGB(248, 248, 252), Muted = Color3.fromRGB(145, 145, 155), Off = Color3.fromRGB(36, 36, 42),
+}
+local PRESETS = { Color3.new(1, 1, 1), Color3.fromRGB(175, 175, 185), Color3.fromRGB(28, 28, 34), Color3.fromRGB(130, 220, 255), Color3.fromRGB(255, 70, 75), Color3.fromRGB(85, 240, 135), Color3.fromRGB(255, 190, 65), Color3.fromRGB(175, 120, 255) }
+local MODES = { "Outline", "Fill", "Outline + Fill", "Boxes" }
+local STYLES = { "Flat", "Wireframe", "Glossy Flow", "Water Flow", "ForceField", "Glass", "Neon Pulse", "Rainbow Flow" }
+local UI = { Gui = nil, Main = nil, Scale = nil, TPill = nil, APill = nil, AStroke = nil, ALbl = nil, Tabs = {}, Pages = {}, CBox = {}, CBtns = {} }
+
+local function ui(cls, pr, par) local o = Instance.new(cls); for k, v in pairs(pr) do o[k] = v end; if par then o.Parent = par end; return o end
+local function rc(p, r) return ui("UICorner", { CornerRadius = UDim.new(0, r) }, p) end
+local function st(p, c, t, tr) return ui("UIStroke", { Color = c or TH.Border, Thickness = t or 1, Transparency = tr or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, p) end
+local function ptr(i) return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch end
+local function mov(i) return i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch end
+
+local function draggable(hdl, tgt, on_tap, on_down, on_up)
+	local drag, moved, sp, fp, ai = false, false, nil, nil, nil
+	tc(hdl.InputBegan:Connect(function(i)
+		if ptr(i) then drag, moved, ai, sp, fp = true, false, i, Vector2.new(i.Position.X, i.Position.Y), tgt.Position; if on_down then on_down() end end
+	end))
+	tc(UserInputService.InputChanged:Connect(function(i)
+		if not drag or not mov(i) or (ai and ai.UserInputType == Enum.UserInputType.Touch and i ~= ai) then return end
+		local d = Vector2.new(i.Position.X, i.Position.Y) - sp
+		if d.Magnitude > 7 then moved = true end
+		if moved then
+			local sc = (UI.Scale and UI.Scale.Scale) or 1
+			local cam = Workspace.CurrentCamera
+			local vp = cam and cam.ViewportSize or Vector2.new(800, 480)
+			local abs = tgt.AbsoluteSize
+			tgt.Position = UDim2.fromOffset(math.clamp(fp.X.Offset + d.X / sc, 4, math.max(4, (vp.X - abs.X) / sc)), math.clamp(fp.Y.Offset + d.Y / sc, 4, math.max(4, (vp.Y - abs.Y) / sc)))
+		end
+	end))
+	tc(UserInputService.InputEnded:Connect(function(i)
+		if drag and ptr(i) and (not ai or i == ai) then drag, ai = false, nil; if on_up then on_up() end; if not moved and on_tap then on_tap() end end
+	end))
+end
+
+local function hdr_lbl(p, t)
+	local h = ui("Frame", { Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1 }, p)
+	ui("TextLabel", { Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = string.upper(t), TextSize = 10, TextColor3 = TH.Muted, TextXAlignment = Enum.TextXAlignment.Left }, h)
+	ui("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BorderSizePixel = 0, BackgroundColor3 = TH.Border, BackgroundTransparency = 0.35 }, h)
+end
+
+local function tog(p, lbl, gv, sv)
+	local r = ui("TextButton", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = TH.Card, BorderSizePixel = 0, AutoButtonColor = false, Text = "" }, p)
+	rc(r, 6); st(r, TH.Border, 1, 0.45)
+	ui("TextLabel", { Size = UDim2.new(1, -64, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = lbl, TextSize = 12, TextColor3 = TH.Txt, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, r)
+	local tr = ui("Frame", { Size = UDim2.fromOffset(38, 20), Position = UDim2.new(1, -48, 0.5, -10), BorderSizePixel = 0 }, r); rc(tr, 10)
+	local ts = st(tr, TH.Border, 1, 0)
+	local kn = ui("Frame", { Size = UDim2.fromOffset(14, 14), BorderSizePixel = 0 }, tr); rc(kn, 7)
+	local function ref(inst)
+		local s = gv()
+		local bg, kbg, pos = s and TH.Accent or TH.Off, s and TH.AccentTxt or TH.Muted, s and UDim2.fromOffset(21, 3) or UDim2.fromOffset(3, 3)
+		ts.Color = s and TH.Accent or TH.Border
+		if inst then tr.BackgroundColor3, kn.BackgroundColor3, kn.Position = bg, kbg, pos
+		else local ti = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out); TweenService:Create(tr, ti, { BackgroundColor3 = bg }):Play(); TweenService:Create(kn, ti, { BackgroundColor3 = kbg, Position = pos }):Play() end
+	end
+	ref(true)
+	r.Activated:Connect(function() sv(not gv()); ref(false) end)
+end
+
+local function sld(p, lbl, mn, mx, step, suf, gv, sv)
+	local c = ui("Frame", { Size = UDim2.new(1, 0, 0, 48), BackgroundColor3 = TH.Card, BorderSizePixel = 0 }, p); rc(c, 6); st(c, TH.Border, 1, 0.45)
+	ui("TextLabel", { Size = UDim2.new(1, -76, 0, 20), Position = UDim2.fromOffset(10, 4), BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = lbl, TextSize = 12, TextColor3 = TH.Txt, TextXAlignment = Enum.TextXAlignment.Left }, c)
+	local vl = ui("TextLabel", { Size = UDim2.fromOffset(64, 20), Position = UDim2.new(1, -72, 0, 4), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = TH.Accent, TextXAlignment = Enum.TextXAlignment.Right }, c)
+	local hit = ui("TextButton", { Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(10, 24), BackgroundTransparency = 1, Text = "", AutoButtonColor = false }, c)
+	local bar = ui("Frame", { Size = UDim2.new(1, 0, 0, 4), Position = UDim2.new(0, 0, 0.5, -2), BackgroundColor3 = TH.Off, BorderSizePixel = 0 }, hit); rc(bar, 2)
+	local fl = ui("Frame", { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = TH.Accent, BorderSizePixel = 0 }, bar); rc(fl, 2)
+	local th = ui("Frame", { Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = TH.Accent, BorderSizePixel = 0 }, bar); rc(th, 6); st(th, TH.Bg, 1.5, 0)
+	local function draw(v)
+		local n = (v - mn) / math.max(mx - mn, 1e-6)
+		fl.Size, th.Position = UDim2.new(n, 0, 1, 0), UDim2.new(n, 0, 0.5, 0)
+		vl.Text = step < 1 and string.format("%.2f%s", v, suf or "") or string.format("%d%s", math.round(v), suf or "")
+	end
+	draw(math.clamp(gv(), mn, mx))
+	local drg, ai = false, nil
+	local function setx(x)
+		local a = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+		local v = math.clamp(math.round((mn + (mx - mn) * a) / step) * step, mn, mx)
+		sv(v); draw(v)
+	end
+	tc(hit.InputBegan:Connect(function(i) if ptr(i) then drg, ai = true, i; if S.Scroll then S.Scroll.ScrollingEnabled = false end; setx(i.Position.X) end end))
+	tc(UserInputService.InputChanged:Connect(function(i) if drg and mov(i) and (not ai or ai.UserInputType ~= Enum.UserInputType.Touch or i == ai) then setx(i.Position.X) end end))
+	tc(UserInputService.InputEnded:Connect(function(i) if drg and ptr(i) and (not ai or i == ai) then drg, ai = false, nil; if S.Scroll then S.Scroll.ScrollingEnabled = true end end end))
+end
+
+local function sel(p, lbl, opts, gv, sv)
+	local c = ui("Frame", { Size = UDim2.new(1, 0, 0, 34), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = TH.Card, BorderSizePixel = 0, ClipsDescendants = true }, p); rc(c, 6); st(c, TH.Border, 1, 0.45)
+	local h = ui("TextButton", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, Text = "", AutoButtonColor = false }, c)
+	ui("TextLabel", { Size = UDim2.new(0.46, 0, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = lbl, TextSize = 12, TextColor3 = TH.Txt, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, h)
+	local vl = ui("TextLabel", { Size = UDim2.new(0.5, -24, 1, 0), Position = UDim2.new(0.48, 0, 0, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = TH.Accent, TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd }, h)
+	local ar = ui("TextLabel", { Size = UDim2.fromOffset(18, 34), Position = UDim2.new(1, -22, 0, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "▾", TextSize = 12, TextColor3 = TH.Muted }, h)
+	local ls = ui("Frame", { Size = UDim2.new(1, -12, 0, 0), Position = UDim2.fromOffset(6, 36), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Visible = false }, c)
+	ui("UIGridLayout", { CellSize = UDim2.new(0.5, -4, 0, 26), CellPadding = UDim2.fromOffset(6, 5), SortOrder = Enum.SortOrder.LayoutOrder }, ls)
+	ui("UIPadding", { PaddingBottom = UDim.new(0, 6) }, ls)
+	local btns, exp = {}, false
+	local function ref()
+		local cur = gv(); vl.Text, ar.Text, ls.Visible = tostring(cur), exp and "▴" or "▾", exp
+		for o, b in pairs(btns) do local a = (o == cur); b.BackgroundColor3, b.TextColor3 = a and TH.Accent or TH.Panel, a and TH.AccentTxt or TH.Txt end
+	end
+	for i, o in ipairs(opts) do
+		local b = ui("TextButton", { LayoutOrder = i, BackgroundColor3 = TH.Panel, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamMedium, Text = o, TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd }, ls)
+		rc(b, 4); st(b, TH.Border, 1, 0.5); btns[o] = b
+		b.Activated:Connect(function() sv(o); exp = false; ref() end)
+	end
+	h.Activated:Connect(function() exp = not exp; ref() end)
+	ref()
+end
+
+local function col_row(p, lbl, gc, sc)
+	local c = ui("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = TH.Card, BorderSizePixel = 0 }, p); rc(c, 6); st(c, TH.Border, 1, 0.45)
+	ui("TextLabel", { Size = UDim2.new(1, -50, 0, 22), Position = UDim2.fromOffset(10, 4), BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = lbl, TextSize = 12, TextColor3 = TH.Txt, TextXAlignment = Enum.TextXAlignment.Left }, c)
+	local pv = ui("Frame", { Size = UDim2.fromOffset(22, 14), Position = UDim2.new(1, -32, 0, 8), BorderSizePixel = 0 }, c); rc(pv, 4); st(pv, TH.Accent, 1, 0.25)
+	local row = ui("Frame", { Size = UDim2.new(1, -20, 0, 22), Position = UDim2.fromOffset(10, 28), BackgroundTransparency = 1 }, c)
+	ui("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Center }, row)
+	local sws = {}
+	local function ref()
+		local cur = gc(); pv.BackgroundColor3 = cur
+		for i, col in ipairs(PRESETS) do sws[i].Color, sws[i].Thickness = (cur == col) and TH.Accent or TH.Border, (cur == col) and 2 or 1 end
+	end
+	for i, col in ipairs(PRESETS) do
+		local sw = ui("TextButton", { Size = UDim2.fromOffset(22, 18), BackgroundColor3 = col, BorderSizePixel = 0, Text = "", AutoButtonColor = false }, row)
+		rc(sw, 4); sws[i] = st(sw, TH.Border, 1, 0)
+		sw.Activated:Connect(function() sc(col); ref() end)
+	end
+	ref()
+end
+
+local function act_btn(p, lbl, cb)
+	local b = ui("TextButton", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = TH.Card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = lbl, TextSize = 12, TextColor3 = TH.Txt }, p)
+	rc(b, 6); st(b, TH.BorderHi, 1, 0.55)
+	b.Activated:Connect(function()
+		TweenService:Create(b, TweenInfo.new(0.08), { BackgroundColor3 = TH.Accent, TextColor3 = TH.AccentTxt }):Play()
+		task.delay(0.12, function() if b.Parent then TweenService:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = TH.Card, TextColor3 = TH.Txt }):Play() end end)
+		cb()
+	end)
+end
+
+-- Aimbot System
+local AimD = {
+	FOVOut = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = Color3.new(0, 0, 0), Thickness = 3, Transparency = 0.75, ZIndex = 4 }),
+	FOV = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = CFG.Aim.FOVColor, Thickness = 1.5, Transparency = 0.75, ZIndex = 5 }),
+	Snap = drw("Line", { Visible = false, Color = Color3.new(1, 1, 1), Thickness = 1.2, Transparency = 0.85, ZIndex = 5 }),
+	Dot = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 3.5, Color = Color3.new(1, 1, 1), Transparency = 1, ZIndex = 6 }),
+}
+local rp = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude; rp.IgnoreWater = true
+
+local function can_see(cam, orig, part, ch)
+	local dir = part.Position - orig
+	if dir.Magnitude < 0.05 then return true end
+	local f = {}; if LP.Character then table.insert(f, LP.Character) end; if cam then table.insert(f, cam) end
+	rp.FilterDescendantsInstances = f
+	local res = Workspace:Raycast(orig, dir, rp)
+	return not res or (res.Instance and res.Instance:IsDescendantOf(ch))
+end
+
+local function pick_part(cam, ch, ctr)
+	local m = CFG.Aim.TargetPart
+	if m == "Head" then return ch:FindFirstChild("Head") or ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso")
+	elseif m == "UpperTorso" then return ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso") or ch:FindFirstChild("HumanoidRootPart")
+	elseif m == "HumanoidRootPart" then return ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart
+	elseif m == "Dynamic" then
+		local h, t = ch:FindFirstChild("Head"), ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso")
+		if h then local sp, on = cam:WorldToViewportPoint(h.Position); if on and sp.Z > 0 and (Vector2.new(sp.X, sp.Y) - ctr).Magnitude <= CFG.Aim.FOV * 0.45 then return h end end
+		return t or h
+	elseif m == "Closest" then
+		local best, bd = nil, math.huge
+		for _, n in ipairs({ "Head", "UpperTorso", "Torso", "LowerTorso", "HumanoidRootPart" }) do
+			local p = ch:FindFirstChild(n)
+			if p and p:IsA("BasePart") then local sp, on = cam:WorldToViewportPoint(p.Position); if on and sp.Z > 0 then local d = (Vector2.new(sp.X, sp.Y) - ctr).Magnitude; if d < bd then bd, best = d, p end end end
+		end
+		return best
+	end
+	return ch:FindFirstChild("Head")
+end
+
+local function aim_on()
+	if not CFG.Aim.Enabled then return false end
+	local a = CFG.Aim.Activation
+	return a == "Always" or (a == "Button (Toggle)" and S.AimTog) or (a == "Button (Hold)" and S.AimHold)
+		or (a == "Shooting" and (S.FireHold or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)))
+end
+
+local function check_tgt(pl, cam, ctr, fov)
+	if pl == LP or ignored(pl, CFG.Aim.TeamCheck, CFG.Aim.IgnoreHearseHidden, CFG.Aim.IgnoreModeratorHidden) then return nil end
+	local ch = pl.Character; local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	if not ch or not ch.Parent or (CFG.Aim.AliveCheck and not alive(ch, hum)) then return nil end
+	local part = pick_part(cam, ch, ctr)
+	if not part or not part:IsA("BasePart") then return nil end
+	local wd = (part.Position - cam.CFrame.Position).Magnitude
+	if wd > CFG.Aim.MaxDistance then return nil end
+	local sp, on = cam:WorldToViewportPoint(part.Position)
+	if not on or sp.Z <= 0.2 then return nil end
+	local fd = (Vector2.new(sp.X, sp.Y) - ctr).Magnitude
+	if fd > fov or (CFG.Aim.WallCheck and not can_see(cam, cam.CFrame.Position, part, ch)) then return nil end
+	return { Player = pl, Hum = hum, Part = part, Fov = fd, Dist = wd }
+end
+
+local function update_aim(dt)
+	local cam = Workspace.CurrentCamera
+	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible, AimD.Snap.Visible, AimD.Dot.Visible = false, false, false, false; return end
+	local ctr = cam.ViewportSize * 0.5
+	local sf = CFG.Aim.Enabled and CFG.Aim.ShowFOV
+	AimD.FOVOut.Visible, AimD.FOV.Visible = sf and not CFG.Aim.FOVFilled, sf
+	if sf then
+		AimD.FOVOut.Position, AimD.FOVOut.Radius, AimD.FOVOut.Thickness = ctr, CFG.Aim.FOV, CFG.Aim.FOVThickness + 1.5
+		AimD.FOV.Position, AimD.FOV.Radius, AimD.FOV.Color, AimD.FOV.Filled, AimD.FOV.Thickness = ctr, CFG.Aim.FOV, CFG.Aim.FOVColor, CFG.Aim.FOVFilled, CFG.Aim.FOVThickness
+		AimD.FOV.Transparency = CFG.Aim.FOVFilled and math.min(CFG.Aim.FOVTransparency, 0.25) or CFG.Aim.FOVTransparency
+	end
+	local act = aim_on()
+	if UI.APill then
+		local sp = CFG.Aim.Enabled and CFG.Aim.ShowAimButton and (CFG.Aim.Activation == "Button (Toggle)" or CFG.Aim.Activation == "Button (Hold)")
+		UI.APill.Visible = sp
+		if sp then
+			UI.APill.BackgroundColor3, UI.ALbl.TextColor3 = act and TH.Accent or TH.Bg, act and TH.AccentTxt or TH.Txt
+			UI.AStroke.Color, UI.ALbl.Text = act and TH.Accent or TH.BorderHi, act and "AIM: ON" or "AIM"
+		end
+	end
+	if not act then S.Locked, AimD.Snap.Visible, AimD.Dot.Visible = nil, false, false; return end
+
+	local tgt = (CFG.Aim.StickyTarget and S.Locked and S.Locked.Parent) and check_tgt(S.Locked, cam, ctr, CFG.Aim.FOV * 1.25) or nil
+	if not tgt then
+		local best = math.huge
+		for _, pl in ipairs(Players:GetPlayers()) do
+			local inf = check_tgt(pl, cam, ctr, CFG.Aim.FOV)
+			if inf then
+				local sc = (CFG.Aim.Priority == "Distance" and inf.Dist) or (CFG.Aim.Priority == "Lowest HP" and ((inf.Hum and inf.Hum.Health or 100) + inf.Fov * 0.05)) or (CFG.Aim.Priority == "Hybrid" and (inf.Fov + inf.Dist * 0.22)) or inf.Fov
+				if sc < best then best, tgt = sc, inf end
+			end
+		end
+	end
+	if not tgt then S.Locked, AimD.Snap.Visible, AimD.Dot.Visible = nil, false, false; return end
+	S.Locked = tgt.Player
+
+	local apos = tgt.Part.Position + (CFG.Aim.Prediction and (tgt.Part.AssemblyLinearVelocity * CFG.Aim.PredictionScale) or Vector3.zero)
+	local sp = cam:WorldToViewportPoint(apos)
+	if CFG.Aim.ShowSnapline and sp.Z > 0 then
+		local pt = Vector2.new(sp.X, sp.Y)
+		AimD.Snap.From, AimD.Snap.To, AimD.Snap.Visible, AimD.Dot.Position, AimD.Dot.Visible = ctr, pt, true, pt, true
+	else AimD.Snap.Visible, AimD.Dot.Visible = false, false end
+
+	if CFG.Aim.Method == "Mouse" and typeof(mousemoverel) == "function" then
+		if sp.Z > 0 then local d = Vector2.new(sp.X, sp.Y) - ctr; local f = math.clamp(1 - CFG.Aim.Smoothness, 0.05, 1); mousemoverel(d.X * f, d.Y * f) end
+	else
+		local g = CFrame.lookAt(cam.CFrame.Position, apos)
+		if CFG.Aim.Smoothness <= 0.01 then cam.CFrame = g
+		else cam.CFrame = cam.CFrame:Lerp(g, 1 - math.exp(-math.max((1 - math.clamp(CFG.Aim.Smoothness, 0, 0.96)) * 42, 1.5) * math.clamp(dt, 0.001, 0.05))) end
+	end
+end
+
+-- San Diego ESP
+local BONES = {
+	{ "HeadCenter", "Neck" }, { "Neck", "UpperChest" }, { "UpperChest", "Waist" }, { "Waist", "Pelvis" },
+	{ "UpperChest", "LeftShoulder" }, { "LeftShoulder", "LeftElbow" }, { "LeftElbow", "LeftWrist" }, { "LeftWrist", "LeftHandTip" },
+	{ "UpperChest", "RightShoulder" }, { "RightShoulder", "RightElbow" }, { "RightElbow", "RightWrist" }, { "RightWrist", "RightHandTip" },
+	{ "Pelvis", "LeftHip" }, { "LeftHip", "LeftKnee" }, { "LeftKnee", "LeftAnkle" }, { "LeftAnkle", "LeftFootTip" },
+	{ "Pelvis", "RightHip" }, { "RightHip", "RightKnee" }, { "RightKnee", "RightAnkle" }, { "RightAnkle", "RightFootTip" },
+}
+local CORNERS = {
+	Vector3.new(-0.5, -0.5, -0.5), Vector3.new(0.5, -0.5, -0.5), Vector3.new(-0.5, 0.5, -0.5), Vector3.new(0.5, 0.5, -0.5),
+	Vector3.new(-0.5, -0.5, 0.5), Vector3.new(0.5, -0.5, 0.5), Vector3.new(-0.5, 0.5, 0.5), Vector3.new(0.5, 0.5, 0.5),
+}
+local ESP_E = {}
+
+local function build_rig(ch)
+	local r15 = ch:FindFirstChild("UpperTorso") ~= nil
+	local pts, atts = {}, {}
+	for _, n in ipairs(r15 and R15 or R6) do local p = ch:FindFirstChild(n); if p and p:IsA("BasePart") then pts[n] = p end end
+	if r15 then
+		local function att(pn, an) local p = pts[pn]; local a = p and p:FindFirstChild(an); return (a and a:IsA("Attachment")) and a or nil end
+		atts.Neck = att("UpperTorso", "NeckRigAttachment") or att("Head", "NeckRigAttachment")
+		atts.Waist = att("LowerTorso", "WaistRigAttachment") or att("UpperTorso", "WaistRigAttachment")
+		atts.LS = att("LeftUpperArm", "LeftShoulderRigAttachment") or att("UpperTorso", "LeftShoulderRigAttachment")
+		atts.LE = att("LeftLowerArm", "LeftElbowRigAttachment") or att("LeftUpperArm", "LeftElbowRigAttachment")
+		atts.LW = att("LeftHand", "LeftWristRigAttachment") or att("LeftLowerArm", "LeftWristRigAttachment")
+		atts.RS = att("RightUpperArm", "RightShoulderRigAttachment") or att("UpperTorso", "RightShoulderRigAttachment")
+		atts.RE = att("RightLowerArm", "RightElbowRigAttachment") or att("RightUpperArm", "RightElbowRigAttachment")
+		atts.RW = att("RightHand", "RightWristRigAttachment") or att("RightLowerArm", "RightWristRigAttachment")
+		atts.LH = att("LeftUpperLeg", "LeftHipRigAttachment") or att("LowerTorso", "LeftHipRigAttachment")
+		atts.LK = att("LeftLowerLeg", "LeftKneeRigAttachment") or att("LeftUpperLeg", "LeftKneeRigAttachment")
+		atts.LA = att("LeftFoot", "LeftAnkleRigAttachment") or att("LeftLowerLeg", "LeftAnkleRigAttachment")
+		atts.RH = att("RightUpperLeg", "RightHipRigAttachment") or att("LowerTorso", "RightHipRigAttachment")
+		atts.RK = att("RightLowerLeg", "RightKneeRigAttachment") or att("RightUpperLeg", "RightKneeRigAttachment")
+		atts.RA = att("RightFoot", "RightAnkleRigAttachment") or att("RightLowerLeg", "RightAnkleRigAttachment")
+	end
+	return { R15 = r15, Parts = pts, Atts = atts }
+end
+local function poff(p, x, y, z) return p.CFrame:PointToWorldSpace(Vector3.new(p.Size.X * x, p.Size.Y * y, p.Size.Z * z)) end
+local function joints_world(rig, out)
+	local p, a = rig.Parts, rig.Atts
+	if not p.Head then return false end
+	out.HeadCenter = p.Head.Position
+	if rig.R15 then
+		local ut, lt = p.UpperTorso, p.LowerTorso
+		if not ut or not lt then return false end
+		out.Neck = (a.Neck and a.Neck.Parent) and a.Neck.WorldPosition or poff(ut, 0, 0.5, 0)
+		out.UpperChest = poff(ut, 0, 0.28, 0)
+		out.Waist = (a.Waist and a.Waist.Parent) and a.Waist.WorldPosition or poff(lt, 0, 0.45, 0)
+		out.Pelvis = poff(lt, 0, -0.3, 0)
+		local function lb(u, l, e, au, al, ae, k1, k2, k3, k4, fy, fz)
+			out[k1] = (au and au.Parent) and au.WorldPosition or (u and poff(u, 0, 0.38, 0))
+			out[k2] = (al and al.Parent) and al.WorldPosition or (l and poff(l, 0, 0.45, 0))
+			out[k3] = (ae and ae.Parent) and ae.WorldPosition or (e and poff(e, 0, 0.4, 0))
+			out[k4] = e and poff(e, 0, fy, fz) or out[k3]
+		end
+		lb(p.LeftUpperArm, p.LeftLowerArm, p.LeftHand, a.LS, a.LE, a.LW, "LeftShoulder", "LeftElbow", "LeftWrist", "LeftHandTip", -0.4, 0)
+		lb(p.RightUpperArm, p.RightLowerArm, p.RightHand, a.RS, a.RE, a.RW, "RightShoulder", "RightElbow", "RightWrist", "RightHandTip", -0.4, 0)
+		lb(p.LeftUpperLeg, p.LeftLowerLeg, p.LeftFoot, a.LH, a.LK, a.LA, "LeftHip", "LeftKnee", "LeftAnkle", "LeftFootTip", -0.35, -0.25)
+		lb(p.RightUpperLeg, p.RightLowerLeg, p.RightFoot, a.RH, a.RK, a.RA, "RightHip", "RightKnee", "RightAnkle", "RightFootTip", -0.35, -0.25)
+	else
+		local t = p.Torso; if not t then return false end
+		out.Neck, out.UpperChest, out.Waist, out.Pelvis = poff(t, 0, 0.5, 0), poff(t, 0, 0.32, 0), t.Position, poff(t, 0, -0.45, 0)
+		local function r6l(pt, k1, k2, k3, k4, fz)
+			if pt then out[k1], out[k2], out[k3], out[k4] = poff(pt, 0, 0.38, 0), pt.Position, poff(pt, 0, -0.35, 0), poff(pt, 0, -0.48, fz) end
+		end
+		r6l(p["Left Arm"], "LeftShoulder", "LeftElbow", "LeftWrist", "LeftHandTip", 0)
+		r6l(p["Right Arm"], "RightShoulder", "RightElbow", "RightWrist", "RightHandTip", 0)
+		r6l(p["Left Leg"], "LeftHip", "LeftKnee", "LeftAnkle", "LeftFootTip", -0.15)
+		r6l(p["Right Leg"], "RightHip", "RightKnee", "RightAnkle", "RightFootTip", -0.15)
+	end
+	return true
+end
+
+local function screen_box(cam, rig)
+	local x1, y1, x2, y2, vis = math.huge, math.huge, -math.huge, -math.huge, false
+	for _, p in pairs(rig.Parts) do
+		if p.Parent then
+			local cf, sz = p.CFrame, p.Size
+			for _, s in ipairs(CORNERS) do
+				local sp, on = cam:WorldToViewportPoint(cf:PointToWorldSpace(Vector3.new(sz.X * s.X, sz.Y * s.Y, sz.Z * s.Z)))
+				if sp.Z > 0.2 then
+					if on then vis = true end
+					if sp.X < x1 then x1 = sp.X end; if sp.Y < y1 then y1 = sp.Y end
+					if sp.X > x2 then x2 = sp.X end; if sp.Y > y2 then y2 = sp.Y end
+				end
+			end
+		end
+	end
+	if not vis or x1 >= x2 or y1 >= y2 then return nil end
+	return x1, y1, x2 - x1, y2 - y1
+end
+
+local function add_esp(pl)
+	local so, sl = {}, {}
+	for i = 1, #BONES do
+		so[i] = drw("Line", { Visible = false, Color = CFG.ESP.ColorOutline, Thickness = 3.5, Transparency = 1, ZIndex = 1 })
+		sl[i] = drw("Line", { Visible = false, Color = CFG.ESP.ColorDefault, Thickness = 1.5, Transparency = 1, ZIndex = 2 })
+	end
+	local e = {
+		Player = pl, Rig = nil, RigChar = nil, WJ = {}, SJ = {}, Conns = {}, SO = so, SL = sl,
+		BO = drw("Square", { Visible = false, Filled = false, Color = CFG.ESP.ColorOutline, Thickness = 3, Transparency = 1, ZIndex = 1 }),
+		B = drw("Square", { Visible = false, Filled = false, Color = CFG.ESP.ColorDefault, Thickness = 1, Transparency = 1, ZIndex = 2 }),
+		HB = drw("Line", { Visible = false, Color = CFG.ESP.ColorOutline, Thickness = 4, Transparency = 1, ZIndex = 1 }),
+		HF = drw("Line", { Visible = false, Color = Color3.fromRGB(80, 255, 95), Thickness = 2, Transparency = 1, ZIndex = 2 }),
+		HO = drw("Circle", { Visible = false, Filled = false, NumSides = 20, Color = CFG.ESP.ColorOutline, Thickness = 3.5, Transparency = 1, ZIndex = 1 }),
+		HC = drw("Circle", { Visible = false, Filled = false, NumSides = 20, Color = CFG.ESP.ColorDefault, Thickness = 1.5, Transparency = 1, ZIndex = 2 }),
+		NT = drw("Text", { Visible = false, Center = true, Outline = true, OutlineColor = CFG.ESP.ColorOutline, Size = 13, Font = 2, Color = CFG.ESP.ColorDefault, Transparency = 1, ZIndex = 3 }),
+		ST = drw("Text", { Visible = false, Center = true, Outline = true, OutlineColor = CFG.ESP.ColorOutline, Size = 12, Font = 2, Color = Color3.fromRGB(220, 220, 220), Transparency = 1, ZIndex = 3 }),
+		TR = drw("Line", { Visible = false, Color = CFG.ESP.ColorDefault, Thickness = 1, Transparency = 0.8, ZIndex = 1 }),
+	}
+	local cc = nil
+	local function oc(ch)
+		if cc then cc:Disconnect(); cc = nil end
+		if ch then
+			local function rb() if pl.Character == ch and ch.Parent then e.Rig, e.RigChar = build_rig(ch), ch end end
+			task.defer(rb); cc = ch.ChildAdded:Connect(function(c) if c:IsA("BasePart") then rb() end end)
+		else e.Rig, e.RigChar = nil, nil end
+	end
+	table.insert(e.Conns, pl.CharacterAdded:Connect(oc))
+	table.insert(e.Conns, pl.CharacterRemoving:Connect(function() if cc then cc:Disconnect(); cc = nil end; e.Rig, e.RigChar = nil, nil end))
+	table.insert(e.Conns, { Disconnect = function() if cc then cc:Disconnect(); cc = nil end end })
+	if pl.Character then oc(pl.Character) end
+	ESP_E[pl] = e
+end
+
+local function hide_esp(e)
+	e.BO.Visible, e.B.Visible, e.HB.Visible, e.HF.Visible, e.HO.Visible, e.HC.Visible, e.NT.Visible, e.ST.Visible, e.TR.Visible = false, false, false, false, false, false, false, false, false
+	for i = 1, #BONES do e.SO[i].Visible, e.SL[i].Visible = false, false end
+end
+local function del_esp(pl)
+	local e = ESP_E[pl]; if not e then return end; ESP_E[pl] = nil
+	for _, c in ipairs(e.Conns) do c:Disconnect() end
+	e.BO:Remove(); e.B:Remove(); e.HB:Remove(); e.HF:Remove(); e.HO:Remove(); e.HC:Remove(); e.NT:Remove(); e.ST:Remove(); e.TR:Remove()
+	for i = 1, #BONES do e.SO[i]:Remove(); e.SL[i]:Remove() end
+end
+
+local function update_esp()
+	local cam = Workspace.CurrentCamera
+	if not cam or not CFG.ESP.Enabled then for _, e in pairs(ESP_E) do hide_esp(e) end; return end
+	local cp, vp = cam.CFrame.Position, cam.ViewportSize
+	for pl, e in pairs(ESP_E) do
+		local ch = pl.Character
+		if not ch or not ch.Parent or ignored(pl, CFG.ESP.TeamCheck, CFG.ESP.IgnoreHearseHidden, CFG.ESP.IgnoreModeratorHidden) then hide_esp(e); continue end
+		local hum = ch:FindFirstChildOfClass("Humanoid")
+		local rt = (hum and hum.RootPart) or ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart
+		if not rt or not alive(ch, hum) then hide_esp(e); continue end
+		local dist = (rt.Position - cp).Magnitude
+		if dist > CFG.ESP.MaxDistance then hide_esp(e); continue end
+		if e.RigChar ~= ch or not e.Rig then e.Rig, e.RigChar = build_rig(ch), ch end
+		if not e.Rig.Parts.Head or (e.Rig.R15 and (not e.Rig.Parts.UpperTorso or not e.Rig.Parts.LowerTorso)) then e.Rig = build_rig(ch) end
+		local bx, by, bw, bh = screen_box(cam, e.Rig)
+		if not bx then hide_esp(e); continue end
+		local col, cx = esp_col(pl, ch), bx + bw * 0.5
+
+		if CFG.ESP.ShowBox then
+			local bp, bs = Vector2.new(bx, by), Vector2.new(bw, bh)
+			e.BO.Visible = CFG.ESP.BoxOutline; if CFG.ESP.BoxOutline then e.BO.Position, e.BO.Size, e.BO.Thickness = bp, bs, CFG.ESP.BoxThickness + 2 end
+			e.B.Position, e.B.Size, e.B.Color, e.B.Thickness, e.B.Visible = bp, bs, col, CFG.ESP.BoxThickness, true
+		else e.BO.Visible, e.B.Visible = false, false end
+
+		if CFG.ESP.ShowHealthBar then
+			local fr, barx = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1), bx - 5
+			e.HB.From, e.HB.To, e.HB.Visible = Vector2.new(barx, by - 1), Vector2.new(barx, by + bh + 1), true
+			e.HF.From, e.HF.To, e.HF.Color, e.HF.Visible = Vector2.new(barx, by + bh), Vector2.new(barx, by + bh - bh * fr), Color3.fromRGB(math.floor(255 * (1 - fr)), math.floor(255 * fr), 55), true
+		else e.HB.Visible, e.HF.Visible = false, false end
+
+		if CFG.ESP.ShowName then
+			local lbl = pl.DisplayName ~= "" and pl.DisplayName or pl.Name
+			if CFG.ESP.ShowWanted then local st_n = wanted_stars(pl); if st_n > 0 then lbl = string.format("%s [W%d]", lbl, st_n) end end
+			if ch:GetAttribute("IsDetained") == true then lbl = lbl .. " [CUFF]" end
+			e.NT.Text, e.NT.Size, e.NT.Position, e.NT.Color, e.NT.Visible = lbl, CFG.ESP.TextSize, Vector2.new(cx, by - CFG.ESP.TextSize - 3), col, true
+		else e.NT.Visible = false end
+
+		if CFG.ESP.ShowDistance or CFG.ESP.ShowTeamTag then
+			local pt = {}
+			if CFG.ESP.ShowTeamTag and pl.Team then table.insert(pt, pl.Team.Name) end
+			if CFG.ESP.ShowDistance then table.insert(pt, string.format("%dm", math.floor(dist + 0.5))) end
+			e.ST.Text, e.ST.Size, e.ST.Position, e.ST.Visible = table.concat(pt, " | "), math.max(11, CFG.ESP.TextSize - 1), Vector2.new(cx, by + bh + 2), true
+		else e.ST.Visible = false end
+
+		if CFG.ESP.ShowTracers then
+			local oy = (CFG.ESP.TracerOrigin == "Center" and vp.Y * 0.5) or (CFG.ESP.TracerOrigin == "Top" and 0) or vp.Y
+			e.TR.From, e.TR.To, e.TR.Color, e.TR.Visible = Vector2.new(vp.X * 0.5, oy), Vector2.new(cx, by + bh), col, true
+		else e.TR.Visible = false end
+
+		local sok = false
+		if CFG.ESP.ShowSkeleton then
+			table.clear(e.WJ); table.clear(e.SJ)
+			if joints_world(e.Rig, e.WJ) then
+				sok = true
+				for j, wp in pairs(e.WJ) do local sp = cam:WorldToViewportPoint(wp); if sp.Z > 0 then e.SJ[j] = Vector2.new(sp.X, sp.Y) end end
+				for i, b in ipairs(BONES) do
+					local p1, p2 = e.SJ[b[1]], e.SJ[b[2]]
+					if p1 and p2 then
+						e.SO[i].Visible = CFG.ESP.SkeletonOutline
+						if CFG.ESP.SkeletonOutline then e.SO[i].From, e.SO[i].To, e.SO[i].Thickness = p1, p2, CFG.ESP.SkeletonThickness + 2 end
+						e.SL[i].From, e.SL[i].To, e.SL[i].Color, e.SL[i].Thickness, e.SL[i].Visible = p1, p2, col, CFG.ESP.SkeletonThickness, true
+					else e.SO[i].Visible, e.SL[i].Visible = false, false end
+				end
+				local hp, hs = e.Rig.Parts.Head, e.SJ.HeadCenter
+				if CFG.ESP.ShowHeadCircle and hp and hs then
+					local ht = cam:WorldToViewportPoint(hp.Position + cam.CFrame.UpVector * (hp.Size.Y * 0.52))
+					local r = ht.Z > 0 and math.clamp((Vector2.new(ht.X, ht.Y) - hs).Magnitude, 2, 42) or 4
+					e.HO.Visible = CFG.ESP.SkeletonOutline; if CFG.ESP.SkeletonOutline then e.HO.Position, e.HO.Radius, e.HO.Thickness = hs, r, CFG.ESP.SkeletonThickness + 2 end
+					e.HC.Position, e.HC.Radius, e.HC.Color, e.HC.Thickness, e.HC.Visible = hs, r, col, CFG.ESP.SkeletonThickness, true
+				else e.HO.Visible, e.HC.Visible = false, false end
+			end
+		end
+		if not sok then e.HO.Visible, e.HC.Visible = false, false; for i = 1, #BONES do e.SO[i].Visible, e.SL[i].Visible = false, false end end
+	end
+end
+
+-- Multi-Style Chams (Players, Self, Arms, Weapon)
+local CH = { OrigP = {}, OrigC = {}, HLs = {}, Bxs = {}, Wrs = {}, AP = {}, AH = {}, AB = {}, AW = {}, AC = {}, AF = nil, HF = nil, HC = nil }
+
+local function ensure_cf()
+	if not CH.AF or not CH.AF.Parent then CH.AF = ui("Folder", { Name = "OcelChamsAdornees" }, gui_root()) end
+	local cam = Workspace.CurrentCamera
+	if cam and (not CH.HF or CH.HC ~= cam or not CH.HF.Parent) then
+		if CH.HF then pcall(function() CH.HF:Destroy() end) end
+		CH.HF, CH.HC = ui("Folder", { Name = "OcelChamsHighlights" }, cam), cam
+	end
+end
+
+local function restore_p(p)
+	local s = CH.OrigP[p]; if not s then return end; CH.OrigP[p] = nil
+	if p and p.Parent then pcall(function() p.Material, p.Color, p.Transparency, p.Reflectance, p.CastShadow = s.M, s.C, s.T, s.R, s.CS; if s.TID ~= nil and p:IsA("MeshPart") then p.TextureID = s.TID end end) end
+end
+
+local function style_vis(cfg, clk, ov)
+	local b, t, stn = ov or cfg.Color, clk * CFG.Chams.FlowSpeed, cfg.Style
+	local c, oc, m, r, ft, ot, wr = b, cfg.OutlineColor, Enum.Material.SmoothPlastic, 0, cfg.FillTransparency, cfg.OutlineTransparency, false
+	if stn == "Wireframe" then m, ft, wr = Enum.Material.ForceField, math.max(ft, 0.55), true
+	elseif stn == "Glossy Flow" then local sh = 0.5 + 0.5 * math.sin(t * 2.4); r = 0.88 + 0.12 * math.sin(t * 2.2); c, oc = b:Lerp(Color3.new(1, 1, 1), sh * 0.45), oc:Lerp(b, sh * 0.35)
+	elseif stn == "Water Flow" then local w1, w2, cr = 0.5 + 0.5 * math.sin(t * 2), 0.5 + 0.5 * math.cos(t * 3.1), Color3.fromRGB(165, 235, 255); m, r = Enum.Material.ForceField, 0.55; c, oc = b:Lerp(cr, w1 * 0.55), oc:Lerp(cr, w2 * 0.4); ft = math.clamp(ft + (w2 - 0.5) * 0.22, 0.08, 0.88)
+	elseif stn == "ForceField" then m, r = Enum.Material.ForceField, 0.2
+	elseif stn == "Glass" then m, r, ft = Enum.Material.Glass, 0.45, math.max(ft, 0.45)
+	elseif stn == "Neon Pulse" then local p = 0.5 + 0.5 * math.sin(t * 3.2); m = Enum.Material.Neon; c = b:Lerp(Color3.new(1, 1, 1), p * 0.28); ft, ot = math.clamp(ft * (0.65 + 0.5 * p), 0, 0.9), math.clamp(ot + (1 - p) * 0.25, 0, 1)
+	elseif stn == "Rainbow Flow" then m = Enum.Material.Neon; c, oc = Color3.fromHSV((t * 0.16) % 1, 0.85, 1), Color3.fromHSV(((t * 0.16) + 0.5) % 1, 0.9, 1) end
+	return { C = c, OC = oc, M = m, R = r, FT = ft, OT = ot, WR = wr }
+end
+
+local function wire_box(p, c, lt, sc, str, tr)
+	CH.AW[p] = true
+	local sb = CH.Wrs[p]
+	if not sb or not sb.Parent then sb = ui("SelectionBox", { Name = "OcelWire" }, CH.AF); CH.Wrs[p] = sb end
+	sb.Adornee, sb.Color3, sb.LineThickness, sb.SurfaceColor3, sb.SurfaceTransparency, sb.Transparency = p, c, lt, sc, str, tr
+end
+
+local function fill_part(p, v)
+	CH.AP[p] = true
+	if not CH.OrigP[p] then
+		local s = { M = p.Material, C = p.Color, T = p.Transparency, R = p.Reflectance, CS = p.CastShadow }
+		if p:IsA("MeshPart") then s.TID = p.TextureID end
+		CH.OrigP[p] = s
+	end
+	pcall(function()
+		p.Material, p.Color, p.Reflectance, p.CastShadow = v.M, v.C, v.R, false
+		p.Transparency = v.FT > 0.02 and math.max(CH.OrigP[p].T, v.FT) or CH.OrigP[p].T
+		if CFG.Chams.StripTextures and p:IsA("MeshPart") then p.TextureID = "" end
+	end)
+	if v.WR then wire_box(p, v.OC, 0.016, v.C, 0.88, math.clamp(v.OT, 0, 0.9)) end
+end
+
+local function box_part(p, v, top)
+	CH.AB[p] = true
+	local pk = CH.Bxs[p]
+	if not pk or not pk.B.Parent then
+		pk = { B = ui("BoxHandleAdornment", { Name = "OcelBox", ZIndex = 5 }, CH.AF), W = ui("SelectionBox", { Name = "OcelBoxEdge" }, CH.AF) }
+		CH.Bxs[p] = pk
+	end
+	pk.B.Adornee, pk.B.Size, pk.B.AlwaysOnTop, pk.B.Color3, pk.B.Transparency, pk.B.Visible = p, p.Size + Vector3.new(0.04, 0.04, 0.04), top, v.C, math.clamp(v.FT, 0.12, 0.95), not v.WR
+	if v.WR or v.OT < 0.99 then
+		pk.W.Adornee, pk.W.Color3, pk.W.LineThickness = p, v.WR and v.C or v.OC, v.WR and 0.022 or 0.014
+		pk.W.SurfaceColor3, pk.W.SurfaceTransparency, pk.W.Transparency = v.C, v.WR and 0.82 or 1, v.OT
+	else pk.W.Adornee = nil end
+end
+
+local function hl_apply(k, ad, ft, fc, ot, oc, top)
+	if not CH.HF then return end
+	CH.AH[k] = true
+	local h = CH.HLs[k]; if not h or not h.Parent then h = ui("Highlight", { Name = "OcelHL" }, CH.HF); CH.HLs[k] = h end
+	h.Adornee, h.FillTransparency, h.FillColor, h.OutlineTransparency, h.OutlineColor, h.Enabled = ad, ft, fc, ot, oc, true
+	h.DepthMode = top and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+end
+
+local function strip_cl(ch)
+	if not CFG.Chams.StripTextures then return end
+	for _, c in ipairs(ch:GetChildren()) do
+		if c:IsA("Shirt") or c:IsA("Pants") or c:IsA("ShirtGraphic") then
+			CH.AC[c] = true
+			if not CH.OrigC[c] then
+				CH.OrigC[c] = { Sh = c:IsA("Shirt") and c.ShirtTemplate or nil, Pa = c:IsA("Pants") and c.PantsTemplate or nil, Gr = c:IsA("ShirtGraphic") and c.Graphic or nil }
+				pcall(function() if c:IsA("Shirt") then c.ShirtTemplate = "" end; if c:IsA("Pants") then c.PantsTemplate = "" end; if c:IsA("ShirtGraphic") then c.Graphic = "" end end)
+			end
+		end
+	end
+end
+
+local function vpart(i) return i:IsA("BasePart") and i.Name ~= "HumanoidRootPart" and i:GetAttribute("OcelIgnore") ~= true end
+
+local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg)
+	local v, m = style_vis(cfg, clk, ov), cfg.Mode
+	if m == "Boxes" then for _, p in ipairs(pts) do if p.Transparency < 0.98 then box_part(p, v, cfg.AlwaysOnTop) end end; return bdg end
+	local fl, out = (m == "Fill" or m == "Outline + Fill"), (m == "Outline" or m == "Outline + Fill")
+	if fl then for _, p in ipairs(pts) do if p.Transparency < 0.98 or CH.OrigP[p] then fill_part(p, v) end end end
+	if (out or (fl and cfg.AlwaysOnTop)) and mdl then
+		if bdg > 0 then
+			hl_apply(k, mdl, (fl and cfg.AlwaysOnTop) and math.clamp(math.max(v.FT, 0.5), 0.3, 0.95) or 1, v.C, out and v.OT or 1, v.OC, cfg.AlwaysOnTop)
+			return bdg - 1
+		elseif out then
+			for _, p in ipairs(pts) do if p.Transparency < 0.98 then wire_box(p, v.OC, 0.015, v.C, 1, v.OT) end end
+		end
+	end
+	return bdg
+end
+
+local function update_chams(clk)
+	ensure_cf()
+	table.clear(CH.AP); table.clear(CH.AH); table.clear(CH.AB); table.clear(CH.AW); table.clear(CH.AC)
+	local bdg, ch = 28, LP.Character
+	local sp, ap, wp, vms = {}, {}, {}, {}
+
+	if ch and ch.Parent then
+		for _, c in ipairs(ch:GetChildren()) do
+			if c:IsA("Tool") then for _, d in ipairs(c:GetDescendants()) do if vpart(d) then table.insert(wp, d) end end
+			elseif c:IsA("Accessory") then for _, d in ipairs(c:GetDescendants()) do if vpart(d) then table.insert(sp, d) end end
+			elseif vpart(c) then table.insert(ARMS[c.Name] and ap or sp, c) end
+		end
+	end
+	local cam = Workspace.CurrentCamera
+	if cam then
+		for _, c in ipairs(cam:GetChildren()) do
+			if c:IsA("Model") then
+				local ha = false
+				for _, d in ipairs(c:GetDescendants()) do
+					if vpart(d) then
+						if ARMS[d.Name] then ha = true; table.insert(ap, d)
+						elseif d.Name ~= "Root" and d.Name ~= "Torso" and d.Name ~= "Head" then table.insert(wp, d) end
+					end
+				end
+				if ha then table.insert(vms, c) end
+			end
+		end
+	end
+	if not CFG.Chams.Arms.Enabled and CFG.Chams.Self.Enabled and ch then
+		for _, c in ipairs(ch:GetChildren()) do if vpart(c) and ARMS[c.Name] then table.insert(sp, c) end end
+	end
+
+	if CFG.Chams.Self.Enabled and ch and #sp > 0 then
+		if CFG.Chams.Self.Mode ~= "Outline" and CFG.Chams.Self.Mode ~= "Boxes" then strip_cl(ch) end
+		bdg = proc_grp("Self", sp, ch, CFG.Chams.Self, clk, nil, bdg)
+	end
+	if CFG.Chams.Arms.Enabled and #ap > 0 then
+		local ac = CFG.Chams.Arms
+		if ac.Mode == "Fill" or ac.Mode == "Outline + Fill" then for _, vm in ipairs(vms) do strip_cl(vm) end end
+		if ac.Mode == "Boxes" then proc_grp("ArmsBox", ap, nil, ac, clk, nil, bdg)
+		else
+			local v = style_vis(ac, clk)
+			if ac.Mode == "Fill" or ac.Mode == "Outline + Fill" then for _, p in ipairs(ap) do if p.Transparency < 0.98 or CH.OrigP[p] then fill_part(p, v) end end end
+			if ac.Mode == "Outline" or ac.Mode == "Outline + Fill" then
+				for i, vm in ipairs(vms) do if bdg > 0 then hl_apply("ArmsVM_" .. i, vm, 1, v.C, v.OT, v.OC, ac.AlwaysOnTop); bdg = bdg - 1 end end
+				if #vms == 0 then for _, p in ipairs(ap) do if p.Transparency < 0.98 then wire_box(p, v.OC, 0.014, v.C, 1, v.OT) end end end
+			end
+		end
+	end
+	if CFG.Chams.Weapon.Enabled and #wp > 0 then
+		local wc, tool = CFG.Chams.Weapon, ch and ch:FindFirstChildOfClass("Tool") or nil
+		if wc.Mode == "Boxes" then proc_grp("WeapBox", wp, nil, wc, clk, nil, bdg)
+		else
+			local v = style_vis(wc, clk)
+			if wc.Mode == "Fill" or wc.Mode == "Outline + Fill" then for _, p in ipairs(wp) do if p.Transparency < 0.98 or CH.OrigP[p] then fill_part(p, v) end end end
+			if wc.Mode == "Outline" or wc.Mode == "Outline + Fill" then
+				if tool and bdg > 0 then hl_apply("WeapTool", tool, 1, v.C, v.OT, v.OC, wc.AlwaysOnTop); bdg = bdg - 1
+				else for _, p in ipairs(wp) do if p.Transparency < 0.98 then wire_box(p, v.OC, 0.015, v.C, 1, v.OT) end end end
+			end
+		end
+	end
+	if CFG.Chams.Players.Enabled then
+		local pc, cp, list = CFG.Chams.Players, cam and cam.CFrame.Position or Vector3.zero, {}
+		for _, pl in ipairs(Players:GetPlayers()) do
+			if pl ~= LP and not ignored(pl, pc.TeamCheck, CFG.ESP.IgnoreHearseHidden, CFG.ESP.IgnoreModeratorHidden) then
+				local pch = pl.Character; local hum = pch and pch:FindFirstChildOfClass("Humanoid"); local rt = (hum and hum.RootPart) or (pch and pch:FindFirstChild("HumanoidRootPart"))
+				if pch and pch.Parent and rt and alive(pch, hum) then
+					local d = (rt.Position - cp).Magnitude; if d <= CFG.ESP.MaxDistance then table.insert(list, { Pl = pl, Ch = pch, D = d }) end
+				end
+			end
+		end
+		table.sort(list, function(a, b) return a.D < b.D end)
+		for _, it in ipairs(list) do
+			local pp = {}; for _, d in ipairs(it.Ch:GetDescendants()) do if vpart(d) then table.insert(pp, d) end end
+			if #pp > 0 then
+				if pc.Mode == "Fill" or pc.Mode == "Outline + Fill" then strip_cl(it.Ch) end
+				bdg = proc_grp("P_" .. it.Pl.UserId, pp, it.Ch, pc, clk, pc.UseTeamColor and esp_col(it.Pl, it.Ch) or nil, bdg)
+			end
+		end
+	end
+
+	for p in pairs(CH.OrigP) do if not CH.AP[p] then restore_p(p) end end
+	for c, sv in pairs(CH.OrigC) do
+		if not CH.AC[c] then CH.OrigC[c] = nil; if c and c.Parent then pcall(function() if sv.Sh ~= nil then c.ShirtTemplate = sv.Sh end; if sv.Pa ~= nil then c.PantsTemplate = sv.Pa end; if sv.Gr ~= nil then c.Graphic = sv.Gr end end) end end
+	end
+	for k, h in pairs(CH.HLs) do if not CH.AH[k] then CH.HLs[k] = nil; pcall(function() h:Destroy() end) end end
+	for p, pk in pairs(CH.Bxs) do if not CH.AB[p] or not p.Parent then CH.Bxs[p] = nil; pcall(function() pk.B:Destroy(); pk.W:Destroy() end) end end
+	for p, sb in pairs(CH.Wrs) do if not CH.AW[p] or not p.Parent then CH.Wrs[p] = nil; pcall(function() sb:Destroy() end) end end
+end
+
+local function cleanup_chams()
+	for p in pairs(CH.OrigP) do restore_p(p) end
+	for c, sv in pairs(CH.OrigC) do if c and c.Parent then pcall(function() if sv.Sh ~= nil then c.ShirtTemplate = sv.Sh end; if sv.Pa ~= nil then c.PantsTemplate = sv.Pa end; if sv.Gr ~= nil then c.Graphic = sv.Gr end end) end end
+	table.clear(CH.OrigC)
+	for _, h in pairs(CH.HLs) do pcall(function() h:Destroy() end) end
+	for _, pk in pairs(CH.Bxs) do pcall(function() pk.B:Destroy(); pk.W:Destroy() end) end
+	for _, sb in pairs(CH.Wrs) do pcall(function() sb:Destroy() end) end
+	table.clear(CH.HLs); table.clear(CH.Bxs); table.clear(CH.Wrs)
+	if CH.AF then pcall(function() CH.AF:Destroy() end) end; if CH.HF then pcall(function() CH.HF:Destroy() end) end
+end
+
+-- Build Ocel-Hub UI
+local function set_open(o) CFG.Menu.Open = o; if UI.Main then UI.Main.Visible = o end end
+local function upd_scale()
+	if not UI.Scale then return end
+	local cam = Workspace.CurrentCamera; local vp = cam and cam.ViewportSize or Vector2.new(800, 480)
+	UI.Scale.Scale = math.clamp(math.min((vp.X - 24) / 430, (vp.Y - 24) / 310, 1), 0.68, 1) * CFG.Menu.UIScale
+end
+local function sw_tab(n)
+	S.Tab = n
+	for k, p in pairs(UI.Pages) do p.Visible = (k == n) end
+	for k, b in pairs(UI.Tabs) do local a = (k == n); b.BackgroundColor3, b.TextColor3 = a and TH.Accent or TH.Card, a and TH.AccentTxt or TH.Muted end
+	if S.Scroll then S.Scroll.CanvasPosition = Vector2.zero end
+end
+local function sw_cham(n)
+	S.ChamTab = n
+	for k, c in pairs(UI.CBox) do c.Visible = (k == n) end
+	for k, b in pairs(UI.CBtns) do local a = (k == n); b.BackgroundColor3, b.TextColor3 = a and TH.Accent or TH.Panel, a and TH.AccentTxt or TH.Muted end
+end
+
+local function build_ui(destroy_fn)
+	local sg = ui("ScreenGui", { Name = "OcelHubGui", ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999999 }, gui_root())
+	UI.Gui = sg; UI.Scale = ui("UIScale", { Scale = 1 }, sg)
+
+	local tp = ui("TextButton", { Name = "OcelTogglePill", Size = UDim2.fromOffset(76, 30), Position = UDim2.fromOffset(14, 70), BackgroundColor3 = TH.Bg, BorderSizePixel = 0, AutoButtonColor = false, Text = "", Visible = CFG.Menu.ShowTogglePill }, sg)
+	rc(tp, 15); st(tp, TH.Accent, 1.4, 0.15)
+	rc(ui("Frame", { Size = UDim2.fromOffset(6, 6), Position = UDim2.fromOffset(11, 12), BackgroundColor3 = TH.Accent, BorderSizePixel = 0 }, tp), 3)
+	ui("TextLabel", { Size = UDim2.new(1, -22, 1, 0), Position = UDim2.fromOffset(19, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "OCEL", TextSize = 11, TextColor3 = TH.Txt, TextXAlignment = Enum.TextXAlignment.Left }, tp)
+	UI.TPill = tp; draggable(tp, tp, function() set_open(not CFG.Menu.Open) end)
+
+	local ap = ui("TextButton", { Name = "OcelAimPill", Size = UDim2.fromOffset(82, 36), Position = UDim2.fromOffset(14, 112), BackgroundColor3 = TH.Bg, BorderSizePixel = 0, AutoButtonColor = false, Text = "", Visible = false }, sg)
+	rc(ap, 18); UI.AStroke = st(ap, TH.BorderHi, 1.5, 0)
+	UI.ALbl = ui("TextLabel", { Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "AIM", TextSize = 12, TextColor3 = TH.Txt }, ap)
+	UI.APill = ap
+	draggable(ap, ap, function() if CFG.Aim.Activation == "Button (Toggle)" then S.AimTog = not S.AimTog end end, function() if CFG.Aim.Activation == "Button (Hold)" then S.AimHold = true end end, function() S.AimHold = false end)
+
+	local mn = ui("Frame", { Name = "MainWindow", Size = UDim2.fromOffset(420, 300), Position = UDim2.fromOffset(105, 30), BackgroundColor3 = TH.Bg, BackgroundTransparency = 0.04, BorderSizePixel = 0, Visible = CFG.Menu.Open }, sg)
+	rc(mn, 10); st(mn, TH.BorderHi, 1.2, 0.35); UI.Main = mn
+
+	local hdr = ui("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = TH.Panel, BorderSizePixel = 0 }, mn); rc(hdr, 10)
+	ui("Frame", { Size = UDim2.new(1, 0, 0, 10), Position = UDim2.new(0, 0, 1, -10), BackgroundColor3 = TH.Panel, BorderSizePixel = 0 }, hdr)
+	ui("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BackgroundColor3 = TH.Border, BorderSizePixel = 0 }, hdr)
+	rc(ui("Frame", { Size = UDim2.fromOffset(7, 7), Position = UDim2.fromOffset(13, 16), BackgroundColor3 = TH.Accent, BorderSizePixel = 0 }, hdr), 4)
+	ui("TextLabel", { Size = UDim2.fromOffset(160, 20), Position = UDim2.fromOffset(26, 9), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "OCEL-HUB", TextSize = 14, TextColor3 = TH.Txt, TextXAlignment = Enum.TextXAlignment.Left }, hdr)
+	local bdg = ui("TextLabel", { Size = UDim2.fromOffset(82, 16), Position = UDim2.fromOffset(112, 11), BackgroundColor3 = TH.Card, BorderSizePixel = 0, Font = Enum.Font.GothamBold, Text = "SAN DIEGO", TextSize = 9, TextColor3 = TH.Muted }, hdr); rc(bdg, 4); st(bdg, TH.Border, 1, 0.4)
+	local mb = ui("TextButton", { Size = UDim2.fromOffset(26, 24), Position = UDim2.new(1, -60, 0.5, -12), BackgroundColor3 = TH.Card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = "—", TextSize = 12, TextColor3 = TH.Txt }, hdr); rc(mb, 5); mb.Activated:Connect(function() set_open(false) end)
+	local cb = ui("TextButton", { Size = UDim2.fromOffset(26, 24), Position = UDim2.new(1, -30, 0.5, -12), BackgroundColor3 = TH.Card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = "×", TextSize = 15, TextColor3 = TH.Txt }, hdr); rc(cb, 5); cb.Activated:Connect(destroy_fn)
+	draggable(hdr, mn)
+
+	local tbar = ui("Frame", { Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(8, 44), BackgroundTransparency = 1 }, mn)
+	ui("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6) }, tbar)
+	for _, tn in ipairs({ "AIM", "ESP", "CHAMS", "MISC" }) do
+		local tb = ui("TextButton", { Size = UDim2.new(0.25, -5, 1, 0), BackgroundColor3 = TH.Card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = tn, TextSize = 11 }, tbar)
+		rc(tb, 6); st(tb, TH.Border, 1, 0.45); UI.Tabs[tn] = tb; tb.Activated:Connect(function() sw_tab(tn) end)
+	end
+
+	local scr = ui("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -86), Position = UDim2.fromOffset(8, 80), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = TH.Accent, ScrollBarImageTransparency = 0.35, CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y }, mn)
+	S.Scroll = scr
+	local function mk_pg(n)
+		local p = ui("Frame", { Name = n .. "Page", Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Visible = false }, scr)
+		ui("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, p); ui("UIPadding", { PaddingBottom = UDim.new(0, 8) }, p); UI.Pages[n] = p; return p
+	end
+
+	local apg = mk_pg("AIM")
+	hdr_lbl(apg, "Core Aimbot")
+	tog(apg, "Enable Aimbot", function() return CFG.Aim.Enabled end, function(v) CFG.Aim.Enabled = v end)
+	sel(apg, "Activation", { "Button (Toggle)", "Button (Hold)", "Always", "Shooting" }, function() return CFG.Aim.Activation end, function(v) CFG.Aim.Activation = v; S.AimTog, S.AimHold = false, false end)
+	tog(apg, "Show Mobile [AIM] Pill", function() return CFG.Aim.ShowAimButton end, function(v) CFG.Aim.ShowAimButton = v end)
+	sel(apg, "Aim Method", { "Camera", "Mouse" }, function() return CFG.Aim.Method end, function(v) CFG.Aim.Method = v end)
+	sel(apg, "Target Bone", { "Head", "UpperTorso", "HumanoidRootPart", "Closest", "Dynamic" }, function() return CFG.Aim.TargetPart end, function(v) CFG.Aim.TargetPart = v end)
+	sel(apg, "Priority", { "Crosshair", "Distance", "Lowest HP", "Hybrid" }, function() return CFG.Aim.Priority end, function(v) CFG.Aim.Priority = v end)
+	hdr_lbl(apg, "Tuning & Prediction")
+	sld(apg, "Smoothness", 0, 0.95, 0.05, "", function() return CFG.Aim.Smoothness end, function(v) CFG.Aim.Smoothness = v end)
+	sld(apg, "Max Distance", 50, 2000, 25, "m", function() return CFG.Aim.MaxDistance end, function(v) CFG.Aim.MaxDistance = v end)
+	tog(apg, "Velocity Prediction", function() return CFG.Aim.Prediction end, function(v) CFG.Aim.Prediction = v end)
+	sld(apg, "Prediction Lead", 0.02, 0.30, 0.02, "s", function() return CFG.Aim.PredictionScale end, function(v) CFG.Aim.PredictionScale = v end)
+	tog(apg, "Sticky Target Lock", function() return CFG.Aim.StickyTarget end, function(v) CFG.Aim.StickyTarget = v end)
+	hdr_lbl(apg, "Checks & FOV Circle")
+	tog(apg, "Wall Check (Visible Only)", function() return CFG.Aim.WallCheck end, function(v) CFG.Aim.WallCheck = v end)
+	tog(apg, "Team Check", function() return CFG.Aim.TeamCheck end, function(v) CFG.Aim.TeamCheck = v end)
+	tog(apg, "Ignore Hearse Hidden", function() return CFG.Aim.IgnoreHearseHidden end, function(v) CFG.Aim.IgnoreHearseHidden = v end)
+	tog(apg, "Show FOV Circle", function() return CFG.Aim.ShowFOV end, function(v) CFG.Aim.ShowFOV = v end)
+	sld(apg, "FOV Radius", 25, 420, 5, "px", function() return CFG.Aim.FOV end, function(v) CFG.Aim.FOV = v end)
+	tog(apg, "FOV Filled", function() return CFG.Aim.FOVFilled end, function(v) CFG.Aim.FOVFilled = v end)
+	tog(apg, "Target Snapline", function() return CFG.Aim.ShowSnapline end, function(v) CFG.Aim.ShowSnapline = v end)
+	col_row(apg, "FOV Color", function() return CFG.Aim.FOVColor end, function(c) CFG.Aim.FOVColor = c end)
+
+	local epg = mk_pg("ESP")
+	hdr_lbl(epg, "Master & Filters")
+	tog(epg, "Enable ESP", function() return CFG.ESP.Enabled end, function(v) CFG.ESP.Enabled = v end)
+	sld(epg, "Max Distance", 100, 2500, 50, "m", function() return CFG.ESP.MaxDistance end, function(v) CFG.ESP.MaxDistance = v end)
+	tog(epg, "Team Check", function() return CFG.ESP.TeamCheck end, function(v) CFG.ESP.TeamCheck = v end)
+	tog(epg, "Ignore Hearse Hidden", function() return CFG.ESP.IgnoreHearseHidden end, function(v) CFG.ESP.IgnoreHearseHidden = v end)
+	tog(epg, "Ignore Moderator Hidden", function() return CFG.ESP.IgnoreModeratorHidden end, function(v) CFG.ESP.IgnoreModeratorHidden = v end)
+	hdr_lbl(epg, "Elements")
+	tog(epg, "2D Box", function() return CFG.ESP.ShowBox end, function(v) CFG.ESP.ShowBox = v end)
+	tog(epg, "Skeleton (R15 / R6)", function() return CFG.ESP.ShowSkeleton end, function(v) CFG.ESP.ShowSkeleton = v end)
+	tog(epg, "Head Circle", function() return CFG.ESP.ShowHeadCircle end, function(v) CFG.ESP.ShowHeadCircle = v end)
+	tog(epg, "Health Bar", function() return CFG.ESP.ShowHealthBar end, function(v) CFG.ESP.ShowHealthBar = v end)
+	tog(epg, "Name & Status", function() return CFG.ESP.ShowName end, function(v) CFG.ESP.ShowName = v end)
+	tog(epg, "Wanted Stars [W1-5]", function() return CFG.ESP.ShowWanted end, function(v) CFG.ESP.ShowWanted = v end)
+	tog(epg, "Distance & Team Tag", function() return CFG.ESP.ShowDistance end, function(v) CFG.ESP.ShowDistance, CFG.ESP.ShowTeamTag = v, v end)
+	tog(epg, "Tracers", function() return CFG.ESP.ShowTracers end, function(v) CFG.ESP.ShowTracers = v end)
+	sel(epg, "Tracer Origin", { "Bottom", "Center", "Top" }, function() return CFG.ESP.TracerOrigin end, function(v) CFG.ESP.TracerOrigin = v end)
+	tog(epg, "Use Team Colors", function() return CFG.ESP.ColorUseTeam end, function(v) CFG.ESP.ColorUseTeam = v end)
+	tog(epg, "Wanted Red Override", function() return CFG.ESP.ColorWantedOverride end, function(v) CFG.ESP.ColorWantedOverride = v end)
+
+	local cpg = mk_pg("CHAMS")
+	hdr_lbl(cpg, "Global Chams Engine")
+	sld(cpg, "Flow Animation Speed", 0.2, 5.0, 0.2, "x", function() return CFG.Chams.FlowSpeed end, function(v) CFG.Chams.FlowSpeed = v end)
+	tog(cpg, "Strip Clothes/Textures on Fill", function() return CFG.Chams.StripTextures end, function(v) CFG.Chams.StripTextures = v end)
+	local sbar = ui("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1 }, cpg)
+	ui("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 5) }, sbar)
+	for _, cn in ipairs({ "Players", "Self", "Arms", "Weapon" }) do
+		local cbtn = ui("TextButton", { Size = UDim2.new(0.25, -4, 1, 0), BackgroundColor3 = TH.Panel, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = cn, TextSize = 11 }, sbar)
+		rc(cbtn, 5); st(cbtn, TH.Border, 1, 0.45); UI.CBtns[cn] = cbtn; cbtn.Activated:Connect(function() sw_cham(cn) end)
+		local hld = ui("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Visible = false }, cpg)
+		ui("UIListLayout", { Padding = UDim.new(0, 6) }, hld)
+		local cf = CFG.Chams[cn]
+		hdr_lbl(hld, cn .. " Chams Settings")
+		tog(hld, "Enable " .. cn .. " Chams", function() return cf.Enabled end, function(v) cf.Enabled = v end)
+		sel(hld, "Render Mode", MODES, function() return cf.Mode end, function(v) cf.Mode = v end)
+		sel(hld, "Material Style", STYLES, function() return cf.Style end, function(v) cf.Style = v end)
+		sld(hld, "Fill Transparency", 0, 0.95, 0.05, "", function() return cf.FillTransparency end, function(v) cf.FillTransparency = v end)
+		sld(hld, "Outline Transparency", 0, 1.0, 0.05, "", function() return cf.OutlineTransparency end, function(v) cf.OutlineTransparency = v end)
+		tog(hld, "Through Walls (AlwaysOnTop)", function() return cf.AlwaysOnTop end, function(v) cf.AlwaysOnTop = v end)
+		if cn == "Players" then
+			tog(hld, "Team Check", function() return cf.TeamCheck end, function(v) cf.TeamCheck = v end)
+			tog(hld, "Use Team/Wanted Color", function() return cf.UseTeamColor end, function(v) cf.UseTeamColor = v end)
+		end
+		col_row(hld, "Fill / Box Color", function() return cf.Color end, function(c) cf.Color = c end)
+		col_row(hld, "Outline Color", function() return cf.OutlineColor end, function(c) cf.OutlineColor = c end)
+		UI.CBox[cn] = hld
+	end
+
+	local mpg = mk_pg("MISC")
+	hdr_lbl(mpg, "Mobile & Interface")
+	sld(mpg, "Menu Scale", 0.75, 1.30, 0.05, "x", function() return CFG.Menu.UIScale end, function(v) CFG.Menu.UIScale = v; upd_scale() end)
+	tog(mpg, "Show [OCEL] Toggle Pill", function() return CFG.Menu.ShowTogglePill end, function(v) CFG.Menu.ShowTogglePill = v; if UI.TPill then UI.TPill.Visible = v end end)
+	act_btn(mpg, "Reset Window Position", function()
+		if UI.Main then UI.Main.Position = UDim2.fromOffset(105, 30) end
+		if UI.TPill then UI.TPill.Position = UDim2.fromOffset(14, 70) end
+		if UI.APill then UI.APill.Position = UDim2.fromOffset(14, 112) end
+	end)
+	act_btn(mpg, "Unload Ocel-Hub", destroy_fn)
+
+	sw_tab(S.Tab); sw_cham(S.ChamTab); upd_scale()
+end
+
+-- Lifecycle & Runtime
+local ctrl
+local function destroy_all()
+	if S.Destroyed then return end; S.Destroyed = true
+	pcall(function() RunService:UnbindFromRenderStep("OcelHubAim") end)
+	for _, c in ipairs(S.Conns) do pcall(function() c:Disconnect() end) end
+	table.clear(S.Conns)
+	for pl in pairs(ESP_E) do del_esp(pl) end
+	for _, d in pairs(AimD) do pcall(function() d:Remove() end) end
+	cleanup_chams()
+	if UI.Gui then pcall(function() UI.Gui:Destroy() end) end
+	if getgenv and getgenv().OcelHub == ctrl then getgenv().OcelHub = nil end
+end
+ctrl = { Config = CFG, Destroy = destroy_all, SetOpen = set_open }
+if getgenv then getgenv().OcelHub = ctrl end
+
+for _, pl in ipairs(Players:GetPlayers()) do if pl ~= LP then add_esp(pl) end end
+tc(Players.PlayerAdded:Connect(function(pl) if pl ~= LP then add_esp(pl) end end))
+tc(Players.PlayerRemoving:Connect(del_esp))
+tc(UserInputService.InputBegan:Connect(function(i, gp)
+	if not gp and i.KeyCode == CFG.Menu.ToggleKey then set_open(not CFG.Menu.Open) end
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then S.FireHold = true end
+end))
+tc(UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then S.FireHold = false end end))
+tc(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(upd_scale))
+
+build_ui(destroy_all)
+RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function(dt) if not S.Destroyed then update_aim(dt) end end)
+tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then update_esp(); update_chams(os.clock()) end end))

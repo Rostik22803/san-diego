@@ -38,7 +38,7 @@ local CFG = {
 	},
 }
 
-local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, Tab = "AIM", ChamTab = "Players", Scroll = nil }
+local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, AimAct = false, AimPos = nil, AimPart = nil, Tab = "AIM", ChamTab = "Players", Scroll = nil }
 local function tc(c) if c then table.insert(S.Conns, c) end return c end
 local function drw(k, p)
 	if not Drawing or not Drawing.new then local st = { Visible = false }; function st:Remove() end; return st end
@@ -293,8 +293,10 @@ end
 local AimD = {
 	FOVOut = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = Color3.new(0, 0, 0), Thickness = 3, Transparency = 0.75, ZIndex = 4 }),
 	FOV = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = CFG.Aim.FOVColor, Thickness = 1.5, Transparency = 0.75, ZIndex = 5 }),
-	Snap = drw("Line", { Visible = false, Color = Color3.new(1, 1, 1), Thickness = 1.2, Transparency = 0.85, ZIndex = 5 }),
-	Dot = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 3.5, Color = Color3.new(1, 1, 1), Transparency = 1, ZIndex = 6 }),
+	SnapOut = drw("Line", { Visible = false, Color = Color3.new(0, 0, 0), Thickness = 3.2, Transparency = 0.65, ZIndex = 4 }),
+	Snap = drw("Line", { Visible = false, Color = Color3.new(1, 1, 1), Thickness = 1.4, Transparency = 0.9, ZIndex = 5 }),
+	DotOut = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 4.8, Color = Color3.new(0, 0, 0), Transparency = 0.75, ZIndex = 5 }),
+	Dot = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 3.0, Color = Color3.new(1, 1, 1), Transparency = 1, ZIndex = 6 }),
 }
 local rp = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude; rp.IgnoreWater = true
 
@@ -349,28 +351,18 @@ local function check_tgt(pl, cam, ctr, fov)
 	return { Player = pl, Hum = hum, Part = part, Fov = fd, Dist = wd }
 end
 
-local function update_aim(dt)
-	local cam = Workspace.CurrentCamera
-	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible, AimD.Snap.Visible, AimD.Dot.Visible = false, false, false, false; return end
-	local ctr = cam.ViewportSize * 0.5
-	local sf = CFG.Aim.Enabled and CFG.Aim.ShowFOV
-	AimD.FOVOut.Visible, AimD.FOV.Visible = sf and not CFG.Aim.FOVFilled, sf
-	if sf then
-		AimD.FOVOut.Position, AimD.FOVOut.Radius, AimD.FOVOut.Thickness = ctr, CFG.Aim.FOV, CFG.Aim.FOVThickness + 1.5
-		AimD.FOV.Position, AimD.FOV.Radius, AimD.FOV.Color, AimD.FOV.Filled, AimD.FOV.Thickness = ctr, CFG.Aim.FOV, CFG.Aim.FOVColor, CFG.Aim.FOVFilled, CFG.Aim.FOVThickness
-		AimD.FOV.Transparency = CFG.Aim.FOVFilled and math.min(CFG.Aim.FOVTransparency, 0.25) or CFG.Aim.FOVTransparency
+local function aim_origin(cam)
+	if CFG.Aim.Method == "Mouse" and UserInputService.MouseBehavior == Enum.MouseBehavior.Default then
+		return UserInputService:GetMouseLocation()
 	end
-	local act = aim_on()
-	if UI.APill then
-		local sp = CFG.Aim.Enabled and CFG.Aim.ShowAimButton and (CFG.Aim.Activation == "Button (Toggle)" or CFG.Aim.Activation == "Button (Hold)")
-		UI.APill.Visible = sp
-		if sp then
-			UI.APill.BackgroundColor3, UI.ALbl.TextColor3 = act and TH.Accent or TH.Bg, act and TH.AccentTxt or TH.Txt
-			UI.AStroke.Color, UI.ALbl.Text = act and TH.Accent or TH.BorderHi, act and "AIM: ON" or "AIM"
-		end
-	end
-	if not act then S.Locked, AimD.Snap.Visible, AimD.Dot.Visible = nil, false, false; return end
+	return cam.ViewportSize * 0.5
+end
 
+local function hide_aim_visuals()
+	AimD.SnapOut.Visible, AimD.Snap.Visible, AimD.DotOut.Visible, AimD.Dot.Visible = false, false, false, false
+end
+
+local function find_aim_tgt(cam, ctr)
 	local tgt = (CFG.Aim.StickyTarget and S.Locked and S.Locked.Parent) and check_tgt(S.Locked, cam, ctr, CFG.Aim.FOV * 1.25) or nil
 	if not tgt then
 		local best = math.huge
@@ -382,22 +374,90 @@ local function update_aim(dt)
 			end
 		end
 	end
-	if not tgt then S.Locked, AimD.Snap.Visible, AimD.Dot.Visible = nil, false, false; return end
-	S.Locked = tgt.Player
+	return tgt
+end
+
+local function update_aim_pre(dt)
+	local cam = Workspace.CurrentCamera
+	if not cam then S.AimAct, S.AimPos, S.AimPart = false, nil, nil; return end
+	local ctr = aim_origin(cam)
+	local act = aim_on()
+	if UI.APill then
+		local sp = CFG.Aim.Enabled and CFG.Aim.ShowAimButton and (CFG.Aim.Activation == "Button (Toggle)" or CFG.Aim.Activation == "Button (Hold)")
+		UI.APill.Visible = sp
+		if sp then
+			UI.APill.BackgroundColor3, UI.ALbl.TextColor3 = act and TH.Accent or TH.Bg, act and TH.AccentTxt or TH.Txt
+			UI.AStroke.Color, UI.ALbl.Text = act and TH.Accent or TH.BorderHi, act and "AIM: ON" or "AIM"
+		end
+	end
+	if not CFG.Aim.Enabled then
+		S.Locked, S.AimAct, S.AimPos, S.AimPart = nil, false, nil, nil
+		return
+	end
+
+	local tgt = find_aim_tgt(cam, ctr)
+	if not tgt then
+		S.Locked, S.AimAct, S.AimPos, S.AimPart = nil, false, nil, nil
+		return
+	end
 
 	local apos = tgt.Part.Position + (CFG.Aim.Prediction and (tgt.Part.AssemblyLinearVelocity * CFG.Aim.PredictionScale) or Vector3.zero)
-	local sp = cam:WorldToViewportPoint(apos)
-	if CFG.Aim.ShowSnapline and sp.Z > 0 then
-		local pt = Vector2.new(sp.X, sp.Y)
-		AimD.Snap.From, AimD.Snap.To, AimD.Snap.Visible, AimD.Dot.Position, AimD.Dot.Visible = ctr, pt, true, pt, true
-	else AimD.Snap.Visible, AimD.Dot.Visible = false, false end
+	S.AimPart, S.AimPos, S.AimAct = tgt.Part, apos, act
+	if not act then S.Locked = nil; return end
+	S.Locked = tgt.Player
 
 	if CFG.Aim.Method == "Mouse" and typeof(mousemoverel) == "function" then
-		if sp.Z > 0 then local d = Vector2.new(sp.X, sp.Y) - ctr; local f = math.clamp(1 - CFG.Aim.Smoothness, 0.05, 1); mousemoverel(d.X * f, d.Y * f) end
+		local sp = cam:WorldToViewportPoint(apos)
+		if sp.Z > 0.2 then
+			local d = Vector2.new(sp.X, sp.Y) - ctr
+			local f = (CFG.Aim.Smoothness <= 0.01) and 1 or math.clamp((1 - CFG.Aim.Smoothness) * math.clamp(dt * 60, 0.4, 2.0) * 0.45, 0.06, 0.9)
+			mousemoverel(d.X * f, d.Y * f)
+		end
 	else
 		local g = CFrame.lookAt(cam.CFrame.Position, apos)
-		if CFG.Aim.Smoothness <= 0.01 then cam.CFrame = g
-		else cam.CFrame = cam.CFrame:Lerp(g, 1 - math.exp(-math.max((1 - math.clamp(CFG.Aim.Smoothness, 0, 0.96)) * 42, 1.5) * math.clamp(dt, 0.001, 0.05))) end
+		if CFG.Aim.Smoothness <= 0.01 then
+			cam.CFrame = g
+		else
+			local alpha = 1 - math.exp(-math.max((1 - math.clamp(CFG.Aim.Smoothness, 0, 0.96)) * 28, 2.5) * math.clamp(dt, 0.001, 0.05))
+			cam.CFrame = cam.CFrame:Lerp(g, alpha)
+		end
+	end
+end
+
+local function update_aim_post()
+	local cam = Workspace.CurrentCamera
+	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible = false, false; hide_aim_visuals(); return end
+	local ctr = aim_origin(cam)
+	local sf = CFG.Aim.Enabled and CFG.Aim.ShowFOV
+	AimD.FOVOut.Visible, AimD.FOV.Visible = sf and not CFG.Aim.FOVFilled, sf
+	if sf then
+		AimD.FOVOut.Position, AimD.FOVOut.Radius, AimD.FOVOut.Thickness = ctr, CFG.Aim.FOV, CFG.Aim.FOVThickness + 1.5
+		AimD.FOV.Position, AimD.FOV.Radius, AimD.FOV.Color, AimD.FOV.Filled, AimD.FOV.Thickness = ctr, CFG.Aim.FOV, CFG.Aim.FOVColor, CFG.Aim.FOVFilled, CFG.Aim.FOVThickness
+		AimD.FOV.Transparency = CFG.Aim.FOVFilled and math.min(CFG.Aim.FOVTransparency, 0.25) or CFG.Aim.FOVTransparency
+	end
+
+	if S.AimAct and S.AimPos and CFG.Aim.Method == "Camera" and CFG.Aim.Smoothness <= 0.01 then
+		cam.CFrame = CFrame.lookAt(cam.CFrame.Position, S.AimPos)
+	end
+
+	if CFG.Aim.Enabled and CFG.Aim.ShowSnapline and S.AimPos then
+		local sp = cam:WorldToViewportPoint(S.AimPos)
+		if sp.Z > 0.2 then
+			local pt = Vector2.new(sp.X, sp.Y)
+			local lcol = S.AimAct and CFG.Aim.FOVColor or Color3.fromRGB(220, 220, 230)
+			local show_line = (pt - ctr).Magnitude >= 4
+			AimD.SnapOut.Visible, AimD.Snap.Visible = show_line, show_line
+			if show_line then
+				AimD.SnapOut.From, AimD.SnapOut.To = ctr, pt
+				AimD.Snap.From, AimD.Snap.To, AimD.Snap.Color = ctr, pt, lcol
+			end
+			AimD.DotOut.Position, AimD.DotOut.Visible = pt, true
+			AimD.Dot.Position, AimD.Dot.Color, AimD.Dot.Visible = pt, lcol, true
+		else
+			hide_aim_visuals()
+		end
+	else
+		hide_aim_visuals()
 	end
 end
 
@@ -718,48 +778,44 @@ local function style_vis(cfg, clk, ov, phase)
 	local wr, flow, hl_ft, hl_oc = false, false, ft, oc
 
 	if stn == "Wireframe" then
-		m, ft, wr, hl_ft = Enum.Material.ForceField, math.clamp(math.max(ft, 0.80), 0.72, 0.94), true, 1
+		m, ft, wr, hl_ft = Enum.Material.ForceField, math.clamp(math.max(ft, 0.85), 0.78, 0.95), true, 0.88
 	elseif stn == "Glossy Flow" then
-		local w = 0.5 + 0.5 * math.sin(t * 2.2 - ph * 1.15)
+		local w = 0.5 + 0.5 * math.sin(t * 1.15 - ph * 1.05)
 		local sh = w ^ 2
-		r, flow = 0.18 + 0.24 * w, true
-		c = b:Lerp(Color3.new(1, 1, 1), sh * 0.55)
-		oc = oc:Lerp(b, w * 0.35)
-		ft = math.clamp(ft + 0.06 - sh * 0.14, 0.04, 0.92)
+		r, flow = 0.22 + 0.14 * w, true
+		c = b:Lerp(Color3.new(1, 1, 1), sh * 0.42)
+		oc = oc:Lerp(b, w * 0.30)
 		hl_ft = 1
 	elseif stn == "Water Flow" then
-		local w = 0.5 + 0.5 * math.sin(t * 2.6 - ph * 1.3)
-		local deep = b:Lerp(Color3.fromRGB(4, 18, 38), 0.45)
-		local crest = b:Lerp(Color3.fromRGB(160, 245, 255), 0.62)
-		m, r, flow = Enum.Material.Glass, 0.22, true
+		local w = 0.5 + 0.5 * math.sin(t * 1.35 - ph * 1.15)
+		local deep = b:Lerp(Color3.fromRGB(6, 22, 44), 0.38)
+		local crest = b:Lerp(Color3.fromRGB(160, 245, 255), 0.52)
+		m, r, flow = Enum.Material.SmoothPlastic, 0.22, true
 		c = w < 0.5 and deep:Lerp(b, w * 2) or b:Lerp(crest, (w - 0.5) * 2)
-		oc = oc:Lerp(crest, w * 0.4)
-		ft = math.clamp(ft + (0.5 - w) * 0.22, 0.08, 0.88)
+		oc = oc:Lerp(crest, w * 0.35)
 		hl_ft = 1
 	elseif stn == "ForceField" then
-		local p = 0.5 + 0.5 * math.sin(t * 2.8 - ph * 0.5)
 		m, r = Enum.Material.ForceField, 0
-		c = b:Lerp(Color3.new(1, 1, 1), p * 0.18)
-		ft = math.clamp(math.max(ft, 0.74), 0.66, 0.90)
-		hl_ft = math.clamp(math.max(ft, 0.80), 0.74, 0.92)
-		hl_oc, ot = b:Lerp(Color3.new(1, 1, 1), 0.25), math.min(ot, 0.1)
+		c = b
+		ft = math.clamp(math.max(ft, 0.76), 0.70, 0.90)
+		hl_ft = math.clamp(math.max(ft, 0.84), 0.78, 0.92)
+		hl_oc, ot = b:Lerp(Color3.new(1, 1, 1), 0.22), math.min(ot, 0.08)
 	elseif stn == "Glass" then
-		m, r = Enum.Material.Glass, 0.32
+		m, r = Enum.Material.SmoothPlastic, 0.28
 		c = b:Lerp(Color3.fromRGB(220, 240, 255), 0.22)
-		ft = math.clamp(math.max(ft, 0.48), 0.42, 0.85)
+		ft = math.clamp(math.max(ft, 0.50), 0.45, 0.85)
 		hl_ft = math.clamp(math.max(ft, 0.62), 0.52, 0.88)
 		hl_oc = oc:Lerp(Color3.new(1, 1, 1), 0.35)
 	elseif stn == "Neon Pulse" then
-		local p = (0.5 + 0.5 * math.sin(t * 3.5)) ^ 1.5
+		local p = 0.5 + 0.5 * math.sin(t * 1.45)
 		m = Enum.Material.Neon
-		c = b:Lerp(Color3.new(1, 1, 1), p * 0.42)
-		ft = math.clamp(ft * 0.45 + (1 - p) * 0.38, 0.04, 0.86)
-		ot = math.clamp(ot + (1 - p) * 0.28, 0, 1)
+		c = b:Lerp(Color3.new(1, 1, 1), p * 0.24)
+		ft = math.clamp(ft + (0.5 - p) * 0.14, 0.05, 0.88)
 		hl_ft = ft
 	elseif stn == "Rainbow Flow" then
-		local h = (t * 0.22 - ph * 0.11) % 1
+		local h = (t * 0.12 - ph * 0.10) % 1
 		m, flow = Enum.Material.Neon, true
-		c, oc = Color3.fromHSV(h, 0.9, 1), Color3.fromHSV((h + 0.5) % 1, 0.9, 1)
+		c, oc = Color3.fromHSV(h, 0.88, 1), Color3.fromHSV((h + 0.5) % 1, 0.88, 1)
 		hl_ft, hl_oc = 1, oc
 	end
 	return { C = c, OC = oc, M = m, R = r, FT = ft, OT = ot, WR = wr, FLW = flow, HL_FT = hl_ft, HL_OC = hl_oc }
@@ -780,13 +836,21 @@ local function adorn_part(p, c, tr, top)
 	if not ad or not ad.Parent or ad.ClassName ~= cls then
 		if ad then pcall(function() ad:Destroy() end) end
 		ad = ui(cls, { Name = "OcelChamAdorn", ZIndex = 5 }, CH.AF)
+		pcall(function() ad.Shading = Enum.AdornShading.Shaded end)
 		CH.Ads[p] = ad
 	end
-	ad.Adornee, ad.AlwaysOnTop, ad.Color3, ad.Transparency, ad.Visible = p, top, c, math.clamp(tr, 0.04, 0.95), true
+	local t_tr = math.clamp(tr, 0.06, 0.94)
+	if ad.Adornee ~= p then ad.Adornee = p end
+	if ad.AlwaysOnTop ~= top then ad.AlwaysOnTop = top end
+	if ad.Color3 ~= c then ad.Color3 = c end
+	if math.abs(ad.Transparency - t_tr) > 0.005 then ad.Transparency = t_tr end
+	if not ad.Visible then ad.Visible = true end
 	if need_sph then
-		ad.Radius = math.max(p.Size.X, p.Size.Y, p.Size.Z) * 0.52
+		local r = math.max(p.Size.X, p.Size.Y, p.Size.Z) * 0.54
+		if math.abs(ad.Radius - r) > 0.005 then ad.Radius = r end
 	else
-		ad.Size = p.Size + Vector3.new(0.025, 0.025, 0.025)
+		local sz = p.Size + Vector3.new(0.04, 0.04, 0.04)
+		if (ad.Size - sz).Magnitude > 0.005 then ad.Size = sz end
 	end
 end
 
@@ -798,9 +862,13 @@ local function fill_part(p, v)
 		CH.OrigP[p] = s
 	end
 	pcall(function()
-		p.Material, p.Color, p.Reflectance, p.CastShadow = v.M, v.C, v.R, false
-		p.Transparency = v.FT > 0.02 and math.max(CH.OrigP[p].T, v.FT) or CH.OrigP[p].T
-		if CFG.Chams.StripTextures and p:IsA("MeshPart") then p.TextureID = "" end
+		if p.Material ~= v.M then p.Material = v.M end
+		if p.Color ~= v.C then p.Color = v.C end
+		if math.abs(p.Reflectance - v.R) > 0.01 then p.Reflectance = v.R end
+		if p.CastShadow ~= false then p.CastShadow = false end
+		local t_tr = v.FT > 0.02 and math.max(CH.OrigP[p].T, v.FT) or CH.OrigP[p].T
+		if math.abs(p.Transparency - t_tr) > 0.005 then p.Transparency = t_tr end
+		if CFG.Chams.StripTextures and p:IsA("MeshPart") and p.TextureID ~= "" then p.TextureID = "" end
 	end)
 	for _, ch_i in ipairs(p:GetChildren()) do
 		if ch_i:IsA("SurfaceAppearance") then
@@ -811,13 +879,14 @@ local function fill_part(p, v)
 			CH.ASM[ch_i] = true
 			if not CH.OrigSM[ch_i] then CH.OrigSM[ch_i] = { TID = ch_i.TextureId, VC = ch_i.VertexColor } end
 			pcall(function()
-				if CFG.Chams.StripTextures then ch_i.TextureId = "" end
-				ch_i.VertexColor = Vector3.new(v.C.R, v.C.G, v.C.B)
+				if CFG.Chams.StripTextures and ch_i.TextureId ~= "" then ch_i.TextureId = "" end
+				local vc = Vector3.new(v.C.R, v.C.G, v.C.B)
+				if (ch_i.VertexColor - vc).Magnitude > 0.01 then ch_i.VertexColor = vc end
 			end)
 		elseif CFG.Chams.StripTextures and (ch_i:IsA("Decal") or ch_i:IsA("Texture")) then
 			CH.ADT[ch_i] = true
 			if CH.OrigDT[ch_i] == nil then CH.OrigDT[ch_i] = ch_i.Transparency end
-			pcall(function() ch_i.Transparency = 1 end)
+			if ch_i.Transparency < 1 then pcall(function() ch_i.Transparency = 1 end) end
 		end
 	end
 end
@@ -848,8 +917,14 @@ local function hl_apply(k, ad, ft, fc, ot, oc, top)
 	if not CH.HF then return end
 	CH.AH[k] = true
 	local h = CH.HLs[k]; if not h or not h.Parent then h = ui("Highlight", { Name = "OcelHL" }, CH.HF); CH.HLs[k] = h end
-	h.Adornee, h.FillTransparency, h.FillColor, h.OutlineTransparency, h.OutlineColor, h.Enabled = ad, ft, fc, ot, oc, true
-	h.DepthMode = top and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+	local dm = top and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+	if h.Adornee ~= ad then h.Adornee = ad end
+	if h.DepthMode ~= dm then h.DepthMode = dm end
+	if math.abs(h.FillTransparency - ft) > 0.005 then h.FillTransparency = ft end
+	if h.FillColor ~= fc then h.FillColor = fc end
+	if math.abs(h.OutlineTransparency - ot) > 0.005 then h.OutlineTransparency = ot end
+	if h.OutlineColor ~= oc then h.OutlineColor = oc end
+	if not h.Enabled then h.Enabled = true end
 end
 
 local function strip_cl(ch)
@@ -934,23 +1009,32 @@ local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
 	local v = style_vis(cfg, clk, ov, 1.4)
 
 	if fl then
-		for _, p in ipairs(pts) do
-			if p.Transparency < 0.98 or CH.OrigP[p] then
-				local pv = v.FLW and style_vis(cfg, clk, ov, PART_PHASE[p.Name] or 1.6) or v
-				fill_part(p, pv)
-				if cfg.AlwaysOnTop and not v.WR and (v.FLW or not mdl or bdg <= 0) then
-					adorn_part(p, pv.C, pv.FT, true)
+		if v.WR then
+			if not dist or dist <= 650 then draw_wire_mesh(k, pts, mdl, cfg, clk, ov) end
+		elseif cfg.AlwaysOnTop then
+			if v.FLW or not mdl or bdg <= 0 then
+				for _, p in ipairs(pts) do
+					if p.Transparency < 0.98 then
+						local pv = v.FLW and style_vis(cfg, clk, ov, PART_PHASE[p.Name] or 1.6) or v
+						adorn_part(p, pv.C, pv.FT, true)
+					end
+				end
+			end
+		else
+			if mdl then strip_cl(mdl) end
+			for _, p in ipairs(pts) do
+				if p.Transparency < 0.98 or CH.OrigP[p] then
+					local pv = v.FLW and style_vis(cfg, clk, ov, PART_PHASE[p.Name] or 1.6) or v
+					fill_part(p, pv)
 				end
 			end
 		end
-		if v.WR and (not dist or dist <= 650) then
-			draw_wire_mesh(k, pts, mdl, cfg, clk, ov)
-		end
 	end
 
-	if out or (fl and cfg.AlwaysOnTop and not v.WR and not v.FLW) or (fl and cfg.Style == "ForceField") then
+	if out or (fl and cfg.AlwaysOnTop) or (fl and cfg.Style == "ForceField") then
 		if mdl and bdg > 0 then
-			local hl_ft = fl and (cfg.AlwaysOnTop and v.HL_FT or (cfg.Style == "ForceField" and v.HL_FT or 1)) or 1
+			local use_hl_fill = fl and (v.WR or (cfg.AlwaysOnTop and not v.FLW) or cfg.Style == "ForceField")
+			local hl_ft = use_hl_fill and v.HL_FT or 1
 			local hl_ot = (out or cfg.Style == "ForceField") and v.OT or 1
 			hl_apply(k, mdl, hl_ft, v.C, hl_ot, v.HL_OC, cfg.AlwaysOnTop)
 			return bdg - 1
@@ -997,13 +1081,10 @@ local function update_chams(clk)
 	end
 
 	if CFG.Chams.Self.Enabled and ch and #sp > 0 then
-		if CFG.Chams.Self.Mode == "Fill" or CFG.Chams.Self.Mode == "Outline + Fill" then strip_cl(ch) end
 		bdg = proc_grp("Self", sp, ch, CFG.Chams.Self, clk, nil, bdg, 0)
 	end
 	if CFG.Chams.Arms.Enabled and #ap > 0 then
-		local ac = CFG.Chams.Arms
-		if ac.Mode == "Fill" or ac.Mode == "Outline + Fill" then for _, vm in ipairs(vms) do strip_cl(vm) end end
-		bdg = proc_grp("Arms", ap, vms[1], ac, clk, nil, bdg, 0)
+		bdg = proc_grp("Arms", ap, vms[1], CFG.Chams.Arms, clk, nil, bdg, 0)
 	end
 	if CFG.Chams.Weapon.Enabled and #wp > 0 then
 		local wc, tool = CFG.Chams.Weapon, ch and ch:FindFirstChildOfClass("Tool") or nil
@@ -1023,7 +1104,6 @@ local function update_chams(clk)
 		for _, it in ipairs(list) do
 			local pp = {}; for _, d in ipairs(it.Ch:GetDescendants()) do if vpart(d) then table.insert(pp, d) end end
 			if #pp > 0 then
-				if pc.Mode == "Fill" or pc.Mode == "Outline + Fill" then strip_cl(it.Ch) end
 				bdg = proc_grp("P_" .. it.Pl.UserId, pp, it.Ch, pc, clk, pc.UseTeamColor and esp_col(it.Pl, it.Ch) or nil, bdg, it.D)
 			end
 		end
@@ -1219,6 +1299,7 @@ end
 local ctrl
 local function destroy_all()
 	if S.Destroyed then return end; S.Destroyed = true
+	pcall(function() RunService:UnbindFromRenderStep("OcelHubAimPre") end)
 	pcall(function() RunService:UnbindFromRenderStep("OcelHubAim") end)
 	for _, c in ipairs(S.Conns) do pcall(function() c:Disconnect() end) end
 	table.clear(S.Conns)
@@ -1242,5 +1323,6 @@ tc(UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.Us
 tc(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(upd_scale))
 
 build_ui(destroy_all)
-RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function(dt) if not S.Destroyed then update_aim(dt) end end)
+RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
+RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
 tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then update_esp(); update_chams(os.clock()) end end))

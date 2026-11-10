@@ -51,7 +51,11 @@ local CFG = {
 		HitChance = 100, MaxDistance = 800, WallCheck = true, MagicBullet = false,
 		TeamCheck = false, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
 		TargetNPCs = false, NPCsCheckpointOnly = true,
-		Prediction = true, PredictionScale = 0.12, ShowTarget = true,
+		Prediction = true, PredictionScale = 0.12, ShowSnapline = true, ShowTarget = true,
+	},
+	Tracers = {
+		Enabled = false, Duration = 1.0, Thickness = 0.14,
+		Fade = true, Rainbow = false, Color = Color3.fromRGB(0, 220, 255),
 	},
 }
 
@@ -386,7 +390,7 @@ local function hide_aim_visuals()
 end
 
 local function find_aim_tgt(cam, ctr)
-	local tgt = (CFG.Aim.StickyTarget and S.Locked and S.Locked.Parent) and check_tgt(S.Locked, cam, ctr, CFG.Aim.FOV * 1.25) or nil
+	local tgt = (CFG.Aim.StickyTarget and S.Locked and S.Locked.Parent) and check_tgt(S.Locked, cam, ctr, CFG.Aim.FOV) or nil
 	if not tgt then
 		local best = math.huge
 		for _, pl in ipairs(Players:GetPlayers()) do
@@ -425,6 +429,10 @@ local function update_aim_pre(dt)
 	end
 
 	local apos = tgt.Part.Position + (CFG.Aim.Prediction and (tgt.Part.AssemblyLinearVelocity * CFG.Aim.PredictionScale) or Vector3.zero)
+	local asp, aon = cam:WorldToViewportPoint(apos)
+	if not aon or asp.Z <= 0.2 or (Vector2.new(asp.X, asp.Y) - ctr).Magnitude > CFG.Aim.FOV then
+		apos = tgt.Part.Position
+	end
 	S.AimPart, S.AimPos, S.AimAct = tgt.Part, apos, act
 	if not act then S.Locked = nil; return end
 	S.Locked = tgt.Player
@@ -464,11 +472,12 @@ local function update_aim_post()
 	end
 
 	if CFG.Aim.Enabled and CFG.Aim.ShowSnapline and S.AimPos then
-		local sp = cam:WorldToViewportPoint(S.AimPos)
-		if sp.Z > 0.2 then
-			local pt = Vector2.new(sp.X, sp.Y)
+		local sp, on = cam:WorldToViewportPoint(S.AimPos)
+		local pt = Vector2.new(sp.X, sp.Y)
+		local fd = (pt - ctr).Magnitude
+		if on and sp.Z > 0.2 and fd <= CFG.Aim.FOV then
 			local lcol = S.AimAct and CFG.Aim.FOVColor or Color3.fromRGB(220, 220, 230)
-			local show_line = (pt - ctr).Magnitude >= 4
+			local show_line = fd >= 4
 			AimD.SnapOut.Visible, AimD.Snap.Visible = show_line, show_line
 			if show_line then
 				AimD.SnapOut.From, AimD.SnapOut.To = ctr, pt
@@ -876,9 +885,30 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SilentD = {
 	FOVOut = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = Color3.new(0, 0, 0), Thickness = 2.8, Transparency = 0.7, ZIndex = 4 }),
 	FOV = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = CFG.Silent.FOVColor, Thickness = 1.3, Transparency = 0.75, ZIndex = 5 }),
+	SnapOut = drw("Line", { Visible = false, Color = Color3.new(0, 0, 0), Thickness = 3.0, Transparency = 0.65, ZIndex = 4 }),
+	Snap = drw("Line", { Visible = false, Color = CFG.Silent.FOVColor, Thickness = 1.3, Transparency = 0.9, ZIndex = 5 }),
 	DotOut = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 4.5, Color = Color3.new(0, 0, 0), Transparency = 0.75, ZIndex = 5 }),
 	Dot = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 2.6, Color = CFG.Silent.FOVColor, Transparency = 1, ZIndex = 6 }),
 }
+local tracer_queue, active_tracers = {}, {}
+local function queue_tryshoot_tracers(shots)
+	if not CFG.Tracers.Enabled or typeof(shots) ~= "table" then return end
+	for i = 1, #shots do
+		local s = shots[i]
+		if typeof(s) == "table" and typeof(s.MuzzlePosition) == "Vector3" then
+			local end_p = s.BulletImpactPosition
+			if typeof(end_p) ~= "Vector3" then
+				local d = s.Direction or s.MuzzleDirectionUnit
+				if typeof(d) == "Vector3" and d.Magnitude > 0.01 then
+					end_p = s.MuzzlePosition + d.Unit * 320
+				end
+			end
+			if typeof(end_p) == "Vector3" and (end_p - s.MuzzlePosition).Magnitude > 0.25 then
+				tracer_queue[#tracer_queue + 1] = { From = s.MuzzlePosition, To = end_p }
+			end
+		end
+	end
+end
 local npc_entity_map, npc_map_scanned = nil, false
 local function silent_npc_id(part)
 	if not part or not part:IsA("BasePart") then return nil end
@@ -1126,7 +1156,7 @@ end
 local function sync_silent_slot()
 	local g = getgenv and getgenv() or _G
 	if g._OcelSilentSlot then
-		g._OcelSilentSlot.Active = (not S.Destroyed and CFG.Silent.Enabled)
+		g._OcelSilentSlot.Active = (not S.Destroyed and (CFG.Silent.Enabled or CFG.Tracers.Enabled))
 	end
 end
 
@@ -1134,17 +1164,17 @@ local function install_silent_hooks()
 	local g = getgenv and getgenv() or _G
 	g._OcelSilentSlot = g._OcelSilentSlot or { Installed = false, DynInstalled = false, Version = 0, Active = false, Handler = nil, DynHandler = nil }
 	local slot = g._OcelSilentSlot
-	slot.Active = (not S.Destroyed and CFG.Silent.Enabled)
+	slot.Active = (not S.Destroyed and (CFG.Silent.Enabled or CFG.Tracers.Enabled))
 
 	slot.Handler = function(kind, self, method, old_nc, ...)
 		local sc = CFG.Silent
-		if S.Destroyed or not sc.Enabled then
+		if S.Destroyed then
 			if kind == "Cast" then return old_nc(self, ...) end
 			return
 		end
 
 		if kind == "Cast" then
-			if in_dyncast_redirect or (sc.Method ~= "Hybrid" and sc.Method ~= "Raycast") then return old_nc(self, ...) end
+			if in_dyncast_redirect or not sc.Enabled or (sc.Method ~= "Hybrid" and sc.Method ~= "Raycast") then return old_nc(self, ...) end
 			if method == "Spherecast" then
 				local orig, rad, dir, params = ...
 				if is_gun_cast(method, orig, dir, params) then
@@ -1168,12 +1198,16 @@ local function install_silent_hooks()
 			end
 			return old_nc(self, ...)
 		elseif kind == "Remote" then
-			patch_tryshoot_table(...)
+			local shots = ...
+			if sc.Enabled then patch_tryshoot_table(shots) end
+			if CFG.Tracers.Enabled then queue_tryshoot_tracers(shots) end
 		end
 	end
 
 	slot.DynHandler = function(orig_run, orig, vec, params, pierce_fn, rad, viz)
 		local sc = CFG.Silent
+		local out_vec = vec
+		local redirected = false
 		if not S.Destroyed and sc.Enabled and (sc.Method == "Hybrid" or sc.Method == "Raycast") then
 			if typeof(orig) == "Vector3" and typeof(vec) == "Vector3" and vec.Magnitude >= 15 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
 				local pass, tgt = sample_silent_shot(false)
@@ -1181,15 +1215,20 @@ local function install_silent_hooks()
 					local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
 					local nv = aim_p - orig
 					if nv.Magnitude > 0.05 then
-						in_dyncast_redirect = true
-						local r1, r2, r3, r4 = orig_run(orig, nv.Unit * vec.Magnitude, params, pierce_fn, rad, viz)
-						in_dyncast_redirect = false
-						return r1, r2, r3, r4
+						out_vec = nv.Unit * vec.Magnitude
+						redirected = true
 					end
 				end
 			end
 		end
-		return orig_run(orig, vec, params, pierce_fn, rad, viz)
+		if redirected then in_dyncast_redirect = true end
+		local r1, r2, r3, r4 = orig_run(orig, out_vec, params, pierce_fn, rad, viz)
+		if redirected then in_dyncast_redirect = false end
+		if not S.Destroyed and not slot.Installed and CFG.Tracers.Enabled and typeof(orig) == "Vector3" and typeof(out_vec) == "Vector3" and out_vec.Magnitude >= 15 and typeof(params) == "RaycastParams" and params.CollisionGroup == "Bullet" and has_local_char_filter(params) then
+			local ep = (r1 and r1.Position) or (orig + out_vec)
+			tracer_queue[#tracer_queue + 1] = { From = orig, To = ep }
+		end
+		return r1, r2, r3, r4
 	end
 
 	-- 1) Direct DynamicCast.Run table hook via getgc (zero __namecall overhead, works without hookmetamethod)
@@ -1309,7 +1348,7 @@ local function install_silent_hooks()
 end
 
 local function hide_silent_visuals()
-	SilentD.FOVOut.Visible, SilentD.FOV.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false
+	SilentD.FOVOut.Visible, SilentD.FOV.Visible, SilentD.SnapOut.Visible, SilentD.Snap.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false, false, false
 end
 
 local function update_silent()
@@ -1329,29 +1368,105 @@ local function update_silent()
 
 	local tgt = find_silent_tgt(false)
 	S.SilentTgt = tgt
-	if tgt and tgt.Part and sc.ShowTarget then
+	if tgt and tgt.Part then
 		local pos = resolve_silent_pos(cam.CFrame.Position, tgt.Part, tgt.Hum)
-		local sp = cam:WorldToViewportPoint(pos)
-		if sp.Z > 0.2 then
-			local pt = Vector2.new(sp.X, sp.Y)
-			SilentD.DotOut.Position, SilentD.DotOut.Visible = pt, true
-			SilentD.Dot.Position, SilentD.Dot.Color, SilentD.Dot.Visible = pt, sc.FOVColor, true
+		local sp, on = cam:WorldToViewportPoint(pos)
+		local pt = Vector2.new(sp.X, sp.Y)
+		local fd = (pt - ctr).Magnitude
+		if not (on and sp.Z > 0.2 and fd <= sc.FOV) then
+			sp, on = cam:WorldToViewportPoint(tgt.Part.Position)
+			pt = Vector2.new(sp.X, sp.Y)
+			fd = (pt - ctr).Magnitude
+		end
+		if on and sp.Z > 0.2 and fd <= sc.FOV then
+			local sl = sc.ShowSnapline and (fd >= 4)
+			SilentD.SnapOut.Visible, SilentD.Snap.Visible = sl, sl
+			if sl then
+				SilentD.SnapOut.From, SilentD.SnapOut.To = ctr, pt
+				SilentD.Snap.From, SilentD.Snap.To, SilentD.Snap.Color = ctr, pt, sc.FOVColor
+			end
+			local sd = sc.ShowTarget
+			SilentD.DotOut.Visible, SilentD.Dot.Visible = sd, sd
+			if sd then
+				SilentD.DotOut.Position = pt
+				SilentD.Dot.Position, SilentD.Dot.Color = pt, sc.FOVColor
+			end
 		else
-			SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false
+			SilentD.SnapOut.Visible, SilentD.Snap.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false
 		end
 	else
-		SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false
+		SilentD.SnapOut.Visible, SilentD.Snap.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false
 	end
 end
 
 local function cleanup_silent()
 	local g = getgenv and getgenv() or _G
 	if g._OcelSilentSlot then
-		g._OcelSilentSlot.Active = false
+		g._OcelSilentSlot.Active = CFG.Tracers.Enabled and not S.Destroyed or false
 		g._OcelSilentSlot.Handler = nil
 		g._OcelSilentSlot.DynHandler = nil
 	end
 	for _, d in pairs(SilentD) do pcall(function() d:Remove() end) end
+end
+
+local function spawn_beam_tracer(from_p, to_p, clk)
+	local ter = Workspace.Terrain
+	if not ter then return end
+	local col = CFG.Tracers.Rainbow and Color3.fromHSV((clk * 0.65) % 1, 0.9, 1) or CFG.Tracers.Color
+	local w = CFG.Tracers.Thickness
+	local a0 = Instance.new("Attachment"); a0.Name = "OcelTrA0"; a0.WorldPosition = from_p; a0.Parent = ter
+	local a1 = Instance.new("Attachment"); a1.Name = "OcelTrA1"; a1.WorldPosition = to_p; a1.Parent = ter
+	local bm = Instance.new("Beam")
+	bm.Name = "OcelTracer"
+	bm.Attachment0, bm.Attachment1 = a0, a1
+	bm.FaceCamera = true
+	bm.LightEmission = 1
+	bm.LightInfluence = 0
+	bm.Width0, bm.Width1 = w, w * 0.45
+	bm.Segments = 1
+	bm.Color = ColorSequence.new(col)
+	bm.Transparency = NumberSequence.new(0.05)
+	bm.Parent = ter
+	table.insert(active_tracers, { A0 = a0, A1 = a1, Beam = bm, T0 = clk, Dur = math.max(CFG.Tracers.Duration, 0.1) })
+end
+
+local function update_tracers(clk)
+	if #tracer_queue > 0 then
+		if CFG.Tracers.Enabled then
+			for i = 1, #tracer_queue do
+				local item = tracer_queue[i]
+				pcall(spawn_beam_tracer, item.From, item.To, clk)
+			end
+		end
+		table.clear(tracer_queue)
+	end
+	for i = #active_tracers, 1, -1 do
+		local tr = active_tracers[i]
+		local elapsed = clk - tr.T0
+		if elapsed >= tr.Dur or not tr.Beam.Parent then
+			pcall(function() tr.Beam:Destroy() end)
+			pcall(function() tr.A0:Destroy() end)
+			pcall(function() tr.A1:Destroy() end)
+			table.remove(active_tracers, i)
+		elseif CFG.Tracers.Fade then
+			local a = math.clamp(elapsed / tr.Dur, 0, 1)
+			local t_val = a * a
+			tr.Beam.Transparency = NumberSequence.new(math.min(0.05 + t_val * 0.95, 1))
+			if CFG.Tracers.Rainbow then
+				tr.Beam.Color = ColorSequence.new(Color3.fromHSV(((tr.T0 + elapsed) * 0.65) % 1, 0.9, 1))
+			end
+		end
+	end
+end
+
+local function cleanup_tracers()
+	table.clear(tracer_queue)
+	for _, tr in ipairs(active_tracers) do
+		pcall(function() tr.Beam:Destroy() end)
+		pcall(function() tr.A0:Destroy() end)
+		pcall(function() tr.A1:Destroy() end)
+	end
+	table.clear(active_tracers)
 end
 
 -- Multi-Style Chams (Players, Self, Arms, Weapon)
@@ -2056,8 +2171,17 @@ local function build_ui(destroy_fn)
 	tog(apg, "Silent Prediction", function() return CFG.Silent.Prediction end, function(v) CFG.Silent.Prediction = v end)
 	sld(apg, "Silent Pred Lead", 0.02, 0.30, 0.02, "s", function() return CFG.Silent.PredictionScale end, function(v) CFG.Silent.PredictionScale = v end)
 	tog(apg, "Show Silent FOV", function() return CFG.Silent.ShowFOV end, function(v) CFG.Silent.ShowFOV = v end)
+	tog(apg, "Show Silent Line (To Target)", function() return CFG.Silent.ShowSnapline end, function(v) CFG.Silent.ShowSnapline = v end)
 	tog(apg, "Show Silent Target Dot", function() return CFG.Silent.ShowTarget end, function(v) CFG.Silent.ShowTarget = v end)
 	col_row(apg, "Silent FOV Color", function() return CFG.Silent.FOVColor end, function(c) CFG.Silent.FOVColor = c end)
+
+	hdr_lbl(apg, "Bullet Tracers")
+	tog(apg, "Enable Bullet Tracers", function() return CFG.Tracers.Enabled end, function(v) CFG.Tracers.Enabled = v; sync_silent_slot() end)
+	sld(apg, "Tracer Duration", 0.2, 3.0, 0.1, "s", function() return CFG.Tracers.Duration end, function(v) CFG.Tracers.Duration = v end)
+	sld(apg, "Tracer Width", 0.05, 0.60, 0.05, "", function() return CFG.Tracers.Thickness end, function(v) CFG.Tracers.Thickness = v end)
+	tog(apg, "Smooth Fade Out", function() return CFG.Tracers.Fade end, function(v) CFG.Tracers.Fade = v end)
+	tog(apg, "Rainbow Tracers", function() return CFG.Tracers.Rainbow end, function(v) CFG.Tracers.Rainbow = v end)
+	col_row(apg, "Tracer Color", function() return CFG.Tracers.Color end, function(c) CFG.Tracers.Color = c end)
 
 	local epg = mk_pg("ESP")
 	hdr_lbl(epg, "Master & Filters")
@@ -2153,6 +2277,7 @@ local function destroy_all()
 	for mdl in pairs(NPC_E) do del_npc_esp(mdl) end
 	for _, d in pairs(AimD) do pcall(function() d:Remove() end) end
 	cleanup_silent()
+	cleanup_tracers()
 	cleanup_crosshair()
 	cleanup_chams()
 	if UI.Gui then pcall(function() UI.Gui:Destroy() end) end
@@ -2185,4 +2310,4 @@ install_silent_hooks()
 build_ui(destroy_all)
 RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
 RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
-tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk); update_silent() end end))
+tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk); update_silent(); update_tracers(clk) end end))

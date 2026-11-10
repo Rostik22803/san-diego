@@ -1,5 +1,6 @@
 -- language: Luau, file: ocel_hub.lua, target: Roblox (San Diego / Mobile & PC)
 -- Ocel-Hub: Monochrome Mobile UI, Aimbot, San Diego ESP, Multi-Style Chams (Players, Self, Arms, Weapon)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -13,12 +14,17 @@ if getgenv and getgenv().OcelHub then pcall(function() getgenv().OcelHub:Destroy
 local CFG = {
 	Menu = { Open = true, ToggleKey = Enum.KeyCode.F3, ShowTogglePill = true, UIScale = 1.0 },
 	Aim = {
-		Enabled = false, Activation = "Button (Toggle)", ShowAimButton = true, Method = "Camera",
+		Enabled = false, SilentAim = false, SilentChance = 100, Activation = "Button (Toggle)", ShowAimButton = true, Method = "Camera",
 		TargetPart = "Head", Priority = "Crosshair", FOV = 130, ShowFOV = true, FOVFilled = false,
 		FOVTransparency = 0.75, FOVThickness = 1.5, FOVColor = Color3.new(1, 1, 1),
 		Smoothness = 0.35, Prediction = false, PredictionScale = 0.12, WallCheck = true,
 		TeamCheck = false, AliveCheck = true, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
 		MaxDistance = 800, StickyTarget = true, ShowSnapline = true,
+	},
+	Gun = {
+		RapidFire = false, RapidFireScale = 2.5, AutoFire = false,
+		FastReload = false, ReloadSpeed = 4.0,
+		NoRecoil = false, NoSpread = false,
 	},
 	ESP = {
 		Enabled = true, MaxDistance = 1500, TeamCheck = false, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
@@ -38,7 +44,7 @@ local CFG = {
 	},
 }
 
-local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, AimAct = false, AimPos = nil, AimPart = nil, Tab = "AIM", ChamTab = "Players", Scroll = nil }
+local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, AimAct = false, AimPos = nil, AimPart = nil, SilentPart = nil, SilentHitPos = nil, SilentProjPos = nil, RollT = 0, RollOk = false, Tab = "AIM", ChamTab = "Players", Scroll = nil }
 local function tc(c) if c then table.insert(S.Conns, c) end return c end
 local function drw(k, p)
 	if not Drawing or not Drawing.new then local st = { Visible = false }; function st:Remove() end; return st end
@@ -379,7 +385,7 @@ end
 
 local function update_aim_pre(dt)
 	local cam = Workspace.CurrentCamera
-	if not cam then S.AimAct, S.AimPos, S.AimPart = false, nil, nil; return end
+	if not cam then S.AimAct, S.AimPos, S.AimPart, S.SilentPart, S.SilentHitPos, S.SilentProjPos = false, nil, nil, nil, nil, nil; return end
 	local ctr = aim_origin(cam)
 	local act = aim_on()
 	if UI.APill then
@@ -390,19 +396,24 @@ local function update_aim_pre(dt)
 			UI.AStroke.Color, UI.ALbl.Text = act and TH.Accent or TH.BorderHi, act and "AIM: ON" or "AIM"
 		end
 	end
-	if not CFG.Aim.Enabled then
-		S.Locked, S.AimAct, S.AimPos, S.AimPart = nil, false, nil, nil
+	if not CFG.Aim.Enabled and not CFG.Aim.SilentAim then
+		S.Locked, S.AimAct, S.AimPos, S.AimPart, S.SilentPart, S.SilentHitPos, S.SilentProjPos = nil, false, nil, nil, nil, nil, nil
 		return
 	end
 
 	local tgt = find_aim_tgt(cam, ctr)
 	if not tgt then
-		S.Locked, S.AimAct, S.AimPos, S.AimPart = nil, false, nil, nil
+		S.Locked, S.AimAct, S.AimPos, S.AimPart, S.SilentPart, S.SilentHitPos, S.SilentProjPos = nil, false, nil, nil, nil, nil, nil
 		return
 	end
 
 	local apos = tgt.Part.Position + (CFG.Aim.Prediction and (tgt.Part.AssemblyLinearVelocity * CFG.Aim.PredictionScale) or Vector3.zero)
 	S.AimPart, S.AimPos, S.AimAct = tgt.Part, apos, act
+	if CFG.Aim.SilentAim then
+		S.SilentPart, S.SilentHitPos, S.SilentProjPos = tgt.Part, tgt.Part.Position, apos
+	else
+		S.SilentPart, S.SilentHitPos, S.SilentProjPos = nil, nil, nil
+	end
 	if not act then S.Locked = nil; return end
 	S.Locked = tgt.Player
 
@@ -428,7 +439,8 @@ local function update_aim_post()
 	local cam = Workspace.CurrentCamera
 	if not cam then AimD.FOV.Visible, AimD.FOVOut.Visible = false, false; hide_aim_visuals(); return end
 	local ctr = aim_origin(cam)
-	local sf = CFG.Aim.Enabled and CFG.Aim.ShowFOV
+	local any_aim = CFG.Aim.Enabled or CFG.Aim.SilentAim
+	local sf = any_aim and CFG.Aim.ShowFOV
 	AimD.FOVOut.Visible, AimD.FOV.Visible = sf and not CFG.Aim.FOVFilled, sf
 	if sf then
 		AimD.FOVOut.Position, AimD.FOVOut.Radius, AimD.FOVOut.Thickness = ctr, CFG.Aim.FOV, CFG.Aim.FOVThickness + 1.5
@@ -440,11 +452,11 @@ local function update_aim_post()
 		cam.CFrame = CFrame.lookAt(cam.CFrame.Position, S.AimPos)
 	end
 
-	if CFG.Aim.Enabled and CFG.Aim.ShowSnapline and S.AimPos then
+	if any_aim and CFG.Aim.ShowSnapline and S.AimPos then
 		local sp = cam:WorldToViewportPoint(S.AimPos)
 		if sp.Z > 0.2 then
 			local pt = Vector2.new(sp.X, sp.Y)
-			local lcol = S.AimAct and CFG.Aim.FOVColor or Color3.fromRGB(220, 220, 230)
+			local lcol = (S.AimAct or CFG.Aim.SilentAim) and CFG.Aim.FOVColor or Color3.fromRGB(220, 220, 230)
 			local show_line = (pt - ctr).Magnitude >= 4
 			AimD.SnapOut.Visible, AimD.Snap.Visible = show_line, show_line
 			if show_line then
@@ -948,6 +960,14 @@ local function strip_cl(ch)
 	end
 end
 
+local function vpart(i)
+	return i:IsA("BasePart") and i.Name ~= "HumanoidRootPart" and i.Name ~= "FakeCamera" and i:GetAttribute("OcelIgnore") ~= true
+end
+
+local function part_vis(p)
+	return p and p.Parent and p.Transparency < 0.98 and p.LocalTransparencyModifier < 0.98
+end
+
 local function draw_wire_mesh(k, pts, mdl, cfg, clk, ov)
 	local cam = Workspace.CurrentCamera
 	if not cam then return end
@@ -987,14 +1007,6 @@ local function draw_wire_mesh(k, pts, mdl, cfg, clk, ov)
 		end
 	end
 	for i = idx + 1, #pool do pool[i].Visible = false end
-end
-
-local function vpart(i)
-	return i:IsA("BasePart") and i.Name ~= "HumanoidRootPart" and i.Name ~= "FakeCamera" and i:GetAttribute("OcelIgnore") ~= true
-end
-
-local function part_vis(p)
-	return p and p.Parent and p.Transparency < 0.98 and p.LocalTransparencyModifier < 0.98
 end
 
 local function proc_grp(k, pts, mdl, cfg, clk, ov, bdg, dist)
@@ -1180,6 +1192,267 @@ local function cleanup_chams()
 	if CH.AF then pcall(function() CH.AF:Destroy() end) end; if CH.HF then pcall(function() CH.HF:Destroy() end) end
 end
 
+-- San Diego Gun Mods & Silent Aim Hooks
+local GM = {
+	Hooked = false, GunConfig = nil, DynamicCast = nil, GunAim = nil, CamCtrl = nil, RecoilSpring = nil,
+	OrigDCRun = nil, OrigRCAP = nil, OrigIAPR = nil, OrigRCD = nil, OrigIP = nil, OrigSI = nil,
+	OrigStats = {}, ByTbl = {}, ReloadIds = {}, PatchedCD = {}, FastTracks = {}, LastSig = "",
+}
+
+local function mod_req(...)
+	local cur = ReplicatedStorage
+	for i = 1, select("#", ...) do cur = cur and cur:FindFirstChild(select(i, ...)) end
+	if cur and cur:IsA("ModuleScript") then local ok, res = pcall(require, cur); if ok then return res end end
+	return nil
+end
+
+local function roll_silent()
+	if CFG.Aim.SilentChance >= 100 then return true end
+	local now = os.clock()
+	if now - S.RollT < 0.004 then return S.RollOk end
+	S.RollT = now
+	S.RollOk = (math.random(1, 100) <= CFG.Aim.SilentChance)
+	return S.RollOk
+end
+
+local function sync_gun_upvals()
+	if not GM.GunConfig or typeof(getgc) ~= "function" or typeof(debug) ~= "table" or typeof(debug.getupvalues) ~= "function" or typeof(debug.setupvalue) ~= "function" then return end
+	local ok_gc, gc = pcall(getgc, false)
+	if not ok_gc or type(gc) ~= "table" then return end
+	for _, fn in ipairs(gc) do
+		if type(fn) == "function" then
+			local ok_u, ups = pcall(debug.getupvalues, fn)
+			if ok_u and type(ups) == "table" then
+				local matched = nil
+				for _, val in pairs(ups) do
+					if type(val) == "table" and GM.ByTbl[val] then matched = val; break end
+				end
+				if matched then
+					local orig = GM.OrigStats[matched]
+					if orig and type(orig.RPM) == "number" and orig.RPM > 0 then
+						local orig_cd = 60 / orig.RPM
+						local new_rpm = (CFG.Gun.RapidFire and not S.Destroyed) and math.clamp(math.round(orig.RPM * CFG.Gun.RapidFireScale), orig.RPM, 3000) or orig.RPM
+						local new_cd = 60 / new_rpm
+						local prev_cd = GM.PatchedCD[fn] or orig_cd
+						for idx, val in pairs(ups) do
+							if type(val) == "number" then
+								if math.abs(val - prev_cd) < 0.0008 or math.abs(val - orig_cd) < 0.0008 then
+									pcall(debug.setupvalue, fn, idx, new_cd)
+								elseif CFG.Gun.RapidFire and not S.Destroyed and val > new_cd and val <= prev_cd + 0.005 then
+									pcall(debug.setupvalue, fn, idx, new_cd)
+								end
+							end
+						end
+						GM.PatchedCD[fn] = new_cd
+					end
+				end
+			end
+		end
+	end
+end
+
+local function sync_gun_configs()
+	if not GM.GunConfig then return end
+	for name, entry in pairs(GM.GunConfig) do
+		if type(entry) == "table" and type(entry.Stats) == "table" then
+			local st_t = entry.Stats
+			local orig = GM.OrigStats[entry]
+			if not orig then
+				orig = {
+					RPM = st_t.RPM, FireMode = st_t.FireMode,
+					Spread = st_t.BulletSpreadDegrees, SSpread = st_t.ShotgunSpreadDegrees,
+					Recoil1 = st_t.FirstPersonCameraRecoilFactor, Recoil3 = st_t.ThirdPersonCameraRecoilFactor,
+				}
+				GM.OrigStats[entry] = orig
+				GM.ByTbl[entry] = name
+			end
+			if type(orig.RPM) == "number" then
+				st_t.RPM = CFG.Gun.RapidFire and math.clamp(math.round(orig.RPM * CFG.Gun.RapidFireScale), orig.RPM, 3000) or orig.RPM
+			end
+			if orig.FireMode ~= nil then
+				st_t.FireMode = CFG.Gun.AutoFire and "Automatic" or orig.FireMode
+			end
+			if type(orig.Spread) == "number" then
+				st_t.BulletSpreadDegrees = CFG.Gun.NoSpread and 0 or orig.Spread
+			end
+			if type(orig.SSpread) == "number" then
+				st_t.ShotgunSpreadDegrees = CFG.Gun.NoSpread and 0 or orig.SSpread
+			end
+			if type(orig.Recoil1) == "number" then
+				st_t.FirstPersonCameraRecoilFactor = CFG.Gun.NoRecoil and 0 or orig.Recoil1
+			end
+			if type(orig.Recoil3) == "number" then
+				st_t.ThirdPersonCameraRecoilFactor = CFG.Gun.NoRecoil and 0 or orig.Recoil3
+			end
+		end
+	end
+	sync_gun_upvals()
+end
+
+local function hook_gun_modules()
+	if GM.Hooked then return end
+	GM.Hooked = true
+
+	GM.GunConfig = mod_req("SharedModules", "Configs", "GunConfig")
+	GM.DynamicCast = mod_req("SharedModules", "QueryUtils", "DynamicCast")
+	GM.GunAim = mod_req("ClientModules", "GunController", "Aim")
+	GM.CamCtrl = mod_req("ClientModules", "CameraController")
+
+	if GM.GunConfig then
+		for _, entry in pairs(GM.GunConfig) do
+			if type(entry) == "table" and type(entry.Animations) == "table" then
+				for _, grp in pairs(entry.Animations) do
+					if type(grp) == "table" then
+						for k, id in pairs(grp) do
+							if type(k) == "string" and string.find(k, "Reload") and (type(id) == "number" or type(id) == "string") then
+								local sid = tostring(id)
+								GM.ReloadIds[sid] = true
+								GM.ReloadIds["rbxassetid://" .. sid] = true
+							end
+						end
+					end
+				end
+			end
+		end
+		sync_gun_configs()
+	end
+
+	if GM.DynamicCast and type(GM.DynamicCast.Run) == "function" then
+		GM.OrigDCRun = GM.DynamicCast.Run
+		GM.DynamicCast.Run = function(origin, dir, params, pierce, radius, dbg, ...)
+			if not S.Destroyed and CFG.Aim.SilentAim and S.SilentPart and S.SilentPart.Parent and S.SilentHitPos then
+				local cam = Workspace.CurrentCamera
+				local ch = LP.Character
+				local rt = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+				local near_cam = cam and (origin - cam.CFrame.Position).Magnitude < 45
+				local near_ch = rt and (origin - rt.Position).Magnitude < 45
+				if (near_cam or near_ch) and roll_silent() then
+					local delta = S.SilentHitPos - origin
+					if delta.Magnitude > 0.05 then dir = delta.Unit * dir.Magnitude end
+				end
+			end
+			return GM.OrigDCRun(origin, dir, params, pierce, radius, dbg, ...)
+		end
+	end
+
+	if GM.GunAim then
+		if type(GM.GunAim.ResolveCameraAimPoint) == "function" then
+			GM.OrigRCAP = GM.GunAim.ResolveCameraAimPoint
+			GM.GunAim.ResolveCameraAimPoint = function(self, ...)
+				if not S.Destroyed and CFG.Aim.SilentAim and S.SilentPart and S.SilentPart.Parent and S.SilentProjPos and roll_silent() then
+					return S.SilentProjPos
+				end
+				return GM.OrigRCAP(self, ...)
+			end
+		end
+		if type(GM.GunAim.IsAimPointReachable) == "function" then
+			GM.OrigIAPR = GM.GunAim.IsAimPointReachable
+			GM.GunAim.IsAimPointReachable = function(self, orig, pt, ...)
+				if not S.Destroyed and CFG.Aim.SilentAim and S.SilentProjPos and (pt - S.SilentProjPos).Magnitude < 3 then
+					return true
+				end
+				return GM.OrigIAPR(self, orig, pt, ...)
+			end
+		end
+		if type(GM.GunAim.ResolveConvergedDirection) == "function" then
+			GM.OrigRCD = GM.GunAim.ResolveConvergedDirection
+			GM.GunAim.ResolveConvergedDirection = function(self, orig, aim_pt, fallback, ...)
+				if not S.Destroyed and CFG.Aim.SilentAim and S.SilentProjPos and (aim_pt - S.SilentProjPos).Magnitude < 3 then
+					local d = aim_pt - orig
+					if d.Magnitude > 1e-4 then return d.Unit end
+				end
+				return GM.OrigRCD(self, orig, aim_pt, fallback, ...)
+			end
+		end
+	end
+
+	if GM.CamCtrl then
+		if type(GM.CamCtrl.ImpulsePitch) == "function" then
+			GM.OrigIP = GM.CamCtrl.ImpulsePitch
+			GM.CamCtrl.ImpulsePitch = function(self, amt, ...)
+				if not S.Destroyed and CFG.Gun.NoRecoil then return end
+				return GM.OrigIP(self, amt, ...)
+			end
+		end
+		if type(GM.CamCtrl.GetRecoilSpring) == "function" then
+			local ok_sp, spr = pcall(GM.CamCtrl.GetRecoilSpring, GM.CamCtrl)
+			if ok_sp and type(spr) == "table" and type(spr.Impulse) == "function" then
+				GM.RecoilSpring = spr
+				GM.OrigSI = spr.Impulse
+				spr.Impulse = function(self, amt, ...)
+					if not S.Destroyed and CFG.Gun.NoRecoil then return end
+					return GM.OrigSI(self, amt, ...)
+				end
+			end
+		end
+	end
+end
+
+local function is_reload_track(tr)
+	local anim = tr.Animation
+	if anim then
+		local aid = anim.AnimationId
+		if GM.ReloadIds[aid] then return true end
+		local num = string.match(aid, "%d+")
+		if num and GM.ReloadIds[num] then return true end
+	end
+	return string.find(string.lower(tr.Name), "reload") ~= nil
+end
+
+local function scan_anim_model(mdl, fast, spd)
+	if not mdl then return end
+	local hum = mdl:FindFirstChildOfClass("Humanoid")
+	local anim = hum and hum:FindFirstChildOfClass("Animator")
+	if not anim then return end
+	for _, tr in ipairs(anim:GetPlayingAnimationTracks()) do
+		if is_reload_track(tr) then
+			if fast then
+				if math.abs(tr.Speed - spd) > 0.05 then pcall(function() tr:AdjustSpeed(spd) end) end
+				GM.FastTracks[tr] = true
+			elseif GM.FastTracks[tr] then
+				GM.FastTracks[tr] = nil
+				pcall(function() tr:AdjustSpeed(1) end)
+			end
+		end
+	end
+end
+
+local function update_gun_mods()
+	local sig = string.format("%s|%s|%.2f|%s|%s", tostring(CFG.Gun.RapidFire), tostring(CFG.Gun.AutoFire), CFG.Gun.RapidFireScale, tostring(CFG.Gun.NoRecoil), tostring(CFG.Gun.NoSpread))
+	if sig ~= GM.LastSig then
+		GM.LastSig = sig
+		sync_gun_configs()
+	end
+	local fast, spd = CFG.Gun.FastReload, CFG.Gun.ReloadSpeed
+	if fast or next(GM.FastTracks) ~= nil then
+		scan_anim_model(LP.Character, fast, spd)
+		local cam = Workspace.CurrentCamera
+		if cam then
+			for _, c in ipairs(cam:GetChildren()) do
+				if c:IsA("Model") then scan_anim_model(c, fast, spd) end
+			end
+		end
+		for tr in pairs(GM.FastTracks) do
+			if not tr.IsPlaying then GM.FastTracks[tr] = nil end
+		end
+	end
+end
+
+local function cleanup_gun_mods()
+	if GM.DynamicCast and GM.OrigDCRun then GM.DynamicCast.Run = GM.OrigDCRun end
+	if GM.GunAim then
+		if GM.OrigRCAP then GM.GunAim.ResolveCameraAimPoint = GM.OrigRCAP end
+		if GM.OrigIAPR then GM.GunAim.IsAimPointReachable = GM.OrigIAPR end
+		if GM.OrigRCD then GM.GunAim.ResolveConvergedDirection = GM.OrigRCD end
+	end
+	if GM.CamCtrl and GM.OrigIP then GM.CamCtrl.ImpulsePitch = GM.OrigIP end
+	if GM.RecoilSpring and GM.OrigSI then GM.RecoilSpring.Impulse = GM.OrigSI end
+	CFG.Gun.RapidFire, CFG.Gun.AutoFire, CFG.Gun.FastReload, CFG.Gun.NoRecoil, CFG.Gun.NoSpread = false, false, false, false, false
+	sync_gun_configs()
+	for tr in pairs(GM.FastTracks) do pcall(function() tr:AdjustSpeed(1) end) end
+	table.clear(GM.FastTracks)
+end
+
 -- Build Ocel-Hub UI
 local function set_open(o) CFG.Menu.Open = o; if UI.Main then UI.Main.Visible = o end end
 local function upd_scale()
@@ -1230,8 +1503,8 @@ local function build_ui(destroy_fn)
 
 	local tbar = ui("Frame", { Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(8, 44), BackgroundTransparency = 1 }, mn)
 	ui("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6) }, tbar)
-	for _, tn in ipairs({ "AIM", "ESP", "CHAMS", "MISC" }) do
-		local tb = ui("TextButton", { Size = UDim2.new(0.25, -5, 1, 0), BackgroundColor3 = TH.Card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = tn, TextSize = 11 }, tbar)
+	for _, tn in ipairs({ "AIM", "GUN", "ESP", "CHAMS", "MISC" }) do
+		local tb = ui("TextButton", { Size = UDim2.new(0.2, -5, 1, 0), BackgroundColor3 = TH.Card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = tn, TextSize = 11 }, tbar)
 		rc(tb, 6); st(tb, TH.Border, 1, 0.45); UI.Tabs[tn] = tb; tb.Activated:Connect(function() sw_tab(tn) end)
 	end
 
@@ -1243,8 +1516,10 @@ local function build_ui(destroy_fn)
 	end
 
 	local apg = mk_pg("AIM")
-	hdr_lbl(apg, "Core Aimbot")
+	hdr_lbl(apg, "Core Aimbot & Silent Aim")
 	tog(apg, "Enable Aimbot", function() return CFG.Aim.Enabled end, function(v) CFG.Aim.Enabled = v end)
+	tog(apg, "Silent Aim (No Snap)", function() return CFG.Aim.SilentAim end, function(v) CFG.Aim.SilentAim = v end)
+	sld(apg, "Silent Hit Chance", 10, 100, 5, "%", function() return CFG.Aim.SilentChance end, function(v) CFG.Aim.SilentChance = v end)
 	sel(apg, "Activation", { "Button (Toggle)", "Button (Hold)", "Always", "Shooting" }, function() return CFG.Aim.Activation end, function(v) CFG.Aim.Activation = v; S.AimTog, S.AimHold = false, false end)
 	tog(apg, "Show Mobile [AIM] Pill", function() return CFG.Aim.ShowAimButton end, function(v) CFG.Aim.ShowAimButton = v end)
 	sel(apg, "Aim Method", { "Camera", "Mouse" }, function() return CFG.Aim.Method end, function(v) CFG.Aim.Method = v end)
@@ -1265,6 +1540,17 @@ local function build_ui(destroy_fn)
 	tog(apg, "FOV Filled", function() return CFG.Aim.FOVFilled end, function(v) CFG.Aim.FOVFilled = v end)
 	tog(apg, "Target Snapline", function() return CFG.Aim.ShowSnapline end, function(v) CFG.Aim.ShowSnapline = v end)
 	col_row(apg, "FOV Color", function() return CFG.Aim.FOVColor end, function(c) CFG.Aim.FOVColor = c end)
+
+	local gpg = mk_pg("GUN")
+	hdr_lbl(gpg, "Fire Rate & Reload")
+	tog(gpg, "Rapid Fire", function() return CFG.Gun.RapidFire end, function(v) CFG.Gun.RapidFire = v; sync_gun_configs() end)
+	sld(gpg, "Fire Rate Multiplier", 1.0, 5.0, 0.2, "x", function() return CFG.Gun.RapidFireScale end, function(v) CFG.Gun.RapidFireScale = v; sync_gun_configs() end)
+	tog(gpg, "Full Auto (All Weapons)", function() return CFG.Gun.AutoFire end, function(v) CFG.Gun.AutoFire = v; sync_gun_configs() end)
+	tog(gpg, "Fast Reload", function() return CFG.Gun.FastReload end, function(v) CFG.Gun.FastReload = v end)
+	sld(gpg, "Reload Speed", 1.5, 10.0, 0.5, "x", function() return CFG.Gun.ReloadSpeed end, function(v) CFG.Gun.ReloadSpeed = v end)
+	hdr_lbl(gpg, "Ballistics & Stability")
+	tog(gpg, "No Recoil", function() return CFG.Gun.NoRecoil end, function(v) CFG.Gun.NoRecoil = v; sync_gun_configs() end)
+	tog(gpg, "No Spread", function() return CFG.Gun.NoSpread end, function(v) CFG.Gun.NoSpread = v; sync_gun_configs() end)
 
 	local epg = mk_pg("ESP")
 	hdr_lbl(epg, "Master & Filters")
@@ -1340,11 +1626,21 @@ local function destroy_all()
 	for pl in pairs(ESP_E) do del_esp(pl) end
 	for _, d in pairs(AimD) do pcall(function() d:Remove() end) end
 	cleanup_chams()
+	cleanup_gun_mods()
 	if UI.Gui then pcall(function() UI.Gui:Destroy() end) end
 	if getgenv and getgenv().OcelHub == ctrl then getgenv().OcelHub = nil end
 end
 ctrl = { Config = CFG, Destroy = destroy_all, SetOpen = set_open }
 if getgenv then getgenv().OcelHub = ctrl end
+
+local function hook_char_equip(ch)
+	if not ch then return end
+	tc(ch.ChildAdded:Connect(function(c)
+		if c:IsA("Tool") and CFG.Gun.RapidFire then task.delay(0.12, function() if not S.Destroyed then sync_gun_upvals() end end) end
+	end))
+end
+if LP.Character then hook_char_equip(LP.Character) end
+tc(LP.CharacterAdded:Connect(hook_char_equip))
 
 for _, pl in ipairs(Players:GetPlayers()) do if pl ~= LP then add_esp(pl) end end
 tc(Players.PlayerAdded:Connect(function(pl) if pl ~= LP then add_esp(pl) end end))
@@ -1356,7 +1652,8 @@ end))
 tc(UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then S.FireHold = false end end))
 tc(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(upd_scale))
 
+hook_gun_modules()
 build_ui(destroy_all)
 RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
 RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
-tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then update_esp(); update_chams(os.clock()) end end))
+tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then update_esp(); update_chams(os.clock()); update_gun_mods() end end))

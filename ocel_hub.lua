@@ -1,5 +1,5 @@
 -- language: Luau, file: ocel_hub.lua, target: Roblox (San Diego / Mobile & PC)
--- Ocel-Hub: Monochrome Mobile UI, Aimbot, San Diego ESP (Players & Border Bots), Multi-Style Chams (Players, Self, Arms, Weapon, Car)
+-- Ocel-Hub: Monochrome Mobile UI, Aimbot, Silent Aim, San Diego ESP (Players & Border Bots), Multi-Style Chams, Crosshair
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -45,9 +45,17 @@ local CFG = {
 		Spin = false, SpinSpeed = 2.0, Rainbow = false, HideGameReticle = false,
 		Color = Color3.new(1, 1, 1), OutlineColor = Color3.new(0, 0, 0),
 	},
+	Silent = {
+		Enabled = false, Method = "Hybrid", TargetPart = "Head", Priority = "Crosshair",
+		FOV = 140, ShowFOV = true, FOVColor = Color3.fromRGB(255, 85, 85),
+		HitChance = 100, MaxDistance = 800, WallCheck = true, MagicBullet = false,
+		TeamCheck = false, IgnoreHearseHidden = true, IgnoreModeratorHidden = false,
+		TargetNPCs = false, NPCsCheckpointOnly = true,
+		Prediction = true, PredictionScale = 0.12, ShowTarget = true,
+	},
 }
 
-local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, AimAct = false, AimPos = nil, AimPart = nil, Tab = "AIM", ChamTab = "Players", Scroll = nil }
+local S = { Destroyed = false, Conns = {}, AimTog = false, AimHold = false, FireHold = false, Locked = nil, AimAct = false, AimPos = nil, AimPart = nil, SilentTgt = nil, SilentHooked = false, SilentHookMsg = "Pending", Tab = "AIM", ChamTab = "Players", Scroll = nil }
 local function tc(c) if c then table.insert(S.Conns, c) end return c end
 local function drw(k, p)
 	if not Drawing or not Drawing.new then local st = { Visible = false }; function st:Remove() end; return st end
@@ -318,14 +326,20 @@ local function can_see(cam, orig, part, ch)
 	return not res or (res.Instance and res.Instance:IsDescendantOf(ch))
 end
 
-local function pick_part(cam, ch, ctr)
-	local m = CFG.Aim.TargetPart
+local RND_PARTS = { "Head", "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso" }
+local function pick_part(cam, ch, ctr, mode, fov_px)
+	local m = mode or CFG.Aim.TargetPart
+	local fov = fov_px or CFG.Aim.FOV
 	if m == "Head" then return ch:FindFirstChild("Head") or ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso")
 	elseif m == "UpperTorso" then return ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso") or ch:FindFirstChild("HumanoidRootPart")
 	elseif m == "HumanoidRootPart" then return ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart
+	elseif m == "Random" then
+		local pool = {}
+		for _, n in ipairs(RND_PARTS) do local p = ch:FindFirstChild(n); if p and p:IsA("BasePart") then table.insert(pool, p) end end
+		return (#pool > 0) and pool[math.random(1, #pool)] or ch:FindFirstChild("Head") or ch.PrimaryPart
 	elseif m == "Dynamic" then
 		local h, t = ch:FindFirstChild("Head"), ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso")
-		if h then local sp, on = cam:WorldToViewportPoint(h.Position); if on and sp.Z > 0 and (Vector2.new(sp.X, sp.Y) - ctr).Magnitude <= CFG.Aim.FOV * 0.45 then return h end end
+		if h then local sp, on = cam:WorldToViewportPoint(h.Position); if on and sp.Z > 0 and (Vector2.new(sp.X, sp.Y) - ctr).Magnitude <= fov * 0.45 then return h end end
 		return t or h
 	elseif m == "Closest" then
 		local best, bd = nil, math.huge
@@ -855,6 +869,321 @@ local function update_esp()
 		local tag = (rk ~= "" and rk) or (is_border and "Checkpoint Authority" or "NPC")
 		render_esp_entry(e, cam, vp, mdl, hum, dist, CFG.ESP.ColorBorderBot, nm .. " [BOT]", tag)
 	end
+end
+
+-- Silent Aim (San Diego DynamicCast + GunService.TryShoot)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SilentD = {
+	FOVOut = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = Color3.new(0, 0, 0), Thickness = 2.8, Transparency = 0.7, ZIndex = 4 }),
+	FOV = drw("Circle", { Visible = false, Filled = false, NumSides = 64, Color = CFG.Silent.FOVColor, Thickness = 1.3, Transparency = 0.75, ZIndex = 5 }),
+	DotOut = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 4.5, Color = Color3.new(0, 0, 0), Transparency = 0.75, ZIndex = 5 }),
+	Dot = drw("Circle", { Visible = false, Filled = true, NumSides = 16, Radius = 2.6, Color = CFG.Silent.FOVColor, Transparency = 1, ZIndex = 6 }),
+}
+local npc_ctrl_mod, npc_ctrl_tried = nil, false
+local function silent_npc_id(part)
+	if not part or not part:IsA("BasePart") then return nil end
+	if not npc_ctrl_tried then
+		npc_ctrl_tried = true
+		pcall(function()
+			local cm = ReplicatedStorage:FindFirstChild("ClientModules")
+			local m = cm and cm:FindFirstChild("NPCController")
+			if m then npc_ctrl_mod = require(m) end
+		end)
+	end
+	if npc_ctrl_mod and typeof(npc_ctrl_mod.GetEntityFromPart) == "function" then
+		local ok, id = pcall(function() return npc_ctrl_mod:GetEntityFromPart(part) end)
+		if ok and typeof(id) == "number" and id ~= 0 then return id end
+	end
+	return nil
+end
+
+local function silent_origin(cam)
+	if UserInputService.MouseBehavior == Enum.MouseBehavior.Default and UserInputService.PreferredInput ~= Enum.PreferredInput.Touch then
+		return UserInputService:GetMouseLocation()
+	end
+	return cam.ViewportSize * 0.5
+end
+
+local function resolve_silent_pos(origin, part, hum)
+	local pos = part.Position
+	if CFG.Silent.Prediction then
+		local vel = part.AssemblyLinearVelocity
+		if vel.Magnitude < 0.05 and hum and hum.RootPart then vel = hum.RootPart.AssemblyLinearVelocity end
+		pos = pos + vel * CFG.Silent.PredictionScale
+	end
+	return pos
+end
+
+local function find_silent_tgt(for_shot)
+	local cam = Workspace.CurrentCamera
+	if not cam then return nil end
+	local sc = CFG.Silent
+	local ctr = silent_origin(cam)
+	local pmode = (for_shot and sc.TargetPart == "Random") and "Random" or ((sc.TargetPart == "Random") and "UpperTorso" or sc.TargetPart)
+	local best_sc, best_tgt = math.huge, nil
+
+	local function eval_model(mdl, hum, pl, is_npc)
+		local part = pick_part(cam, mdl, ctr, pmode, sc.FOV)
+		if not part or not part:IsA("BasePart") then return end
+		local wd = (part.Position - cam.CFrame.Position).Magnitude
+		if wd > sc.MaxDistance then return end
+		local sp, on = cam:WorldToViewportPoint(part.Position)
+		if not on or sp.Z <= 0.2 then return end
+		local fd = (Vector2.new(sp.X, sp.Y) - ctr).Magnitude
+		if fd > sc.FOV then return end
+		if sc.WallCheck and not can_see(cam, cam.CFrame.Position, part, mdl) then return end
+		local score = (sc.Priority == "Distance" and wd)
+			or (sc.Priority == "Lowest HP" and ((hum and hum.Health or 100) + fd * 0.05))
+			or (sc.Priority == "Hybrid" and (fd + wd * 0.22))
+			or fd
+		if score < best_sc then
+			best_sc = score
+			best_tgt = { Model = mdl, Player = pl, Hum = hum, Part = part, Fov = fd, Dist = wd, IsNPC = is_npc }
+		end
+	end
+
+	for _, pl in ipairs(Players:GetPlayers()) do
+		if pl ~= LP and not ignored(pl, sc.TeamCheck, sc.IgnoreHearseHidden, sc.IgnoreModeratorHidden) then
+			local ch = pl.Character; local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+			if ch and ch.Parent and alive(ch, hum) then eval_model(ch, hum, pl, false) end
+		end
+	end
+
+	if sc.TargetNPCs then
+		for mdl, _ in pairs(NPC_E) do
+			local hum = mdl:FindFirstChildOfClass("Humanoid")
+			local rt = (hum and hum.RootPart) or mdl:FindFirstChild("HumanoidRootPart") or mdl.PrimaryPart
+			if npc_alive(mdl, hum, rt) then
+				local _, _, _, is_border = npc_info(mdl, rt)
+				if not sc.NPCsCheckpointOnly or is_border then eval_model(mdl, hum, nil, true) end
+			end
+		end
+	end
+	return best_tgt
+end
+
+local last_cast_roll = { T = 0, Pass = false, Tgt = nil }
+local function sample_silent_shot()
+	local now = os.clock()
+	if now - last_cast_roll.T < 0.006 then return last_cast_roll.Pass, last_cast_roll.Tgt end
+	local pass = (CFG.Silent.HitChance >= 100) or (math.random(1, 100) <= CFG.Silent.HitChance)
+	local tgt = pass and find_silent_tgt(true) or nil
+	last_cast_roll.T, last_cast_roll.Pass, last_cast_roll.Tgt = now, pass, tgt
+	return pass, tgt
+end
+
+local function has_local_char_filter(params)
+	local my_ch = LP and LP.Character
+	if not my_ch then return false end
+	local list = params.FilterDescendantsInstances
+	if typeof(list) ~= "table" then return false end
+	for i = 1, #list do
+		if list[i] == my_ch then return true end
+	end
+	return false
+end
+
+local function is_gun_cast(method, orig, dir, params)
+	if typeof(params) ~= "RaycastParams" then return false end
+	if params.CollisionGroup ~= "Bullet" or params.FilterType ~= Enum.RaycastFilterType.Exclude then return false end
+	if typeof(orig) ~= "Vector3" or typeof(dir) ~= "Vector3" or dir.Magnitude < 25 then return false end
+	if not has_local_char_filter(params) then return false end
+	-- Spherecast in bullet path only happens in DynamicCast (CastShot), never camera aim/scope probes
+	if method == "Spherecast" then return true end
+	if typeof(debug) == "table" and typeof(debug.info) == "function" then
+		local saw_script = false
+		for lvl = 2, 6 do
+			local src = debug.info(lvl, "s")
+			if not src then break end
+			if #src > 3 and src ~= "[C]" then saw_script = true end
+			if src:find("DynamicCast", 1, true) then return true end
+		end
+		if saw_script then return false end
+	end
+	local cam = Workspace.CurrentCamera
+	return cam ~= nil and (orig - cam.CFrame.Position).Magnitude > 0.85
+end
+
+local function install_silent_hooks()
+	local g = getgenv and getgenv() or _G
+	g._OcelSilentSlot = g._OcelSilentSlot or { Installed = false, Handler = nil }
+	local slot = g._OcelSilentSlot
+
+	slot.Handler = function(kind, self, method, old_nc, ...)
+		local sc = CFG.Silent
+		if S.Destroyed or not sc.Enabled then return old_nc(self, ...) end
+
+		if kind == "Cast" then
+			if sc.Method ~= "Hybrid" and sc.Method ~= "Raycast" then return old_nc(self, ...) end
+			if method == "Spherecast" then
+				local orig, rad, dir, params = ...
+				if is_gun_cast(method, orig, dir, params) then
+					local pass, tgt = sample_silent_shot()
+					if pass and tgt and tgt.Part then
+						local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
+						local nv = aim_p - orig
+						if nv.Magnitude > 0.05 then return old_nc(self, orig, rad, nv.Unit * dir.Magnitude, params) end
+					end
+				end
+			else
+				local orig, dir, params = ...
+				if is_gun_cast(method, orig, dir, params) then
+					local pass, tgt = sample_silent_shot()
+					if pass and tgt and tgt.Part then
+						local aim_p = resolve_silent_pos(orig, tgt.Part, tgt.Hum)
+						local nv = aim_p - orig
+						if nv.Magnitude > 0.05 then return old_nc(self, orig, nv.Unit * dir.Magnitude, params) end
+					end
+				end
+			end
+			return old_nc(self, ...)
+		elseif kind == "Remote" then
+			if self.Name ~= "TryShoot" or not self.Parent or self.Parent.Name ~= "GunService" then
+				return old_nc(self, ...)
+			end
+			local shots = ...
+			if typeof(shots) ~= "table" or #shots == 0 then return old_nc(self, ...) end
+			local tgt = S.SilentTgt or find_silent_tgt(true)
+			for i = 1, #shots do
+				local s = shots[i]
+				if typeof(s) == "table" and typeof(s.MuzzlePosition) == "Vector3" then
+					if s.Direction ~= nil and s.BulletImpactPosition == nil then
+						-- Projectile shot: always align server direction when Hybrid or Remote
+						if (sc.Method == "Hybrid" or sc.Method == "Remote") then
+							local pass, ptgt = sample_silent_shot()
+							ptgt = pass and (ptgt or tgt) or nil
+							if ptgt and ptgt.Part then
+								local ap = resolve_silent_pos(s.MuzzlePosition, ptgt.Part, ptgt.Hum)
+								local dv = ap - s.MuzzlePosition
+								if dv.Magnitude > 0.05 then s.Direction = dv.Unit end
+							end
+						end
+					elseif s.MuzzleDirectionUnit ~= nil then
+						local already_hit = (typeof(s.TargetInstance) == "Instance") and (s.TargetCharacter ~= nil or s.NPCId ~= nil)
+						if sc.Method == "Hybrid" and already_hit and typeof(s.BulletImpactPosition) == "Vector3" then
+							local dv = s.BulletImpactPosition - s.MuzzlePosition
+							if dv.Magnitude > 0.05 then s.MuzzleDirectionUnit = dv.Unit end
+						elseif sc.Method == "Remote" or (sc.MagicBullet and not already_hit) then
+							local pass, rtgt = sample_silent_shot()
+							rtgt = pass and (rtgt or tgt) or nil
+							if rtgt and rtgt.Model then
+								local cam = Workspace.CurrentCamera
+								local ctr = cam and silent_origin(cam) or Vector2.new(0, 0)
+								local part = (sc.TargetPart == "Random" and cam) and pick_part(cam, rtgt.Model, ctr, "Random", sc.FOV) or rtgt.Part
+								if part and part:IsA("BasePart") then
+									local ap = resolve_silent_pos(s.MuzzlePosition, part, rtgt.Hum)
+									local dv = ap - s.MuzzlePosition
+									if dv.Magnitude > 0.05 then
+										local ud = dv.Unit
+										s.MuzzleDirectionUnit = ud
+										s.BulletImpactPosition = ap
+										s.Normal = -ud
+										s.TargetInstance = part
+										if rtgt.IsNPC then
+											s.TargetCharacter = nil
+											s.NPCId = silent_npc_id(part)
+											s.TargetSize = nil
+											s.TargetCFrame = nil
+										else
+											s.TargetCharacter = rtgt.Model
+											s.NPCId = nil
+											s.TargetSize = part.Size
+											s.TargetCFrame = part.CFrame
+										end
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+			return old_nc(self, shots)
+		end
+		return old_nc(self, ...)
+	end
+
+	if slot.Installed then
+		S.SilentHooked, S.SilentHookMsg = true, "Hooked"
+		return
+	end
+
+	local wrap = typeof(newcclosure) == "function" and newcclosure or function(f) return f end
+	local nc_hook = wrap(function(self, ...)
+		local old_fn = slot.OldNC
+		local h = slot.Handler
+		if not h or (checkcaller and checkcaller()) then return old_fn(self, ...) end
+		local m = getnamecallmethod()
+		if self == Workspace and (m == "Raycast" or m == "Spherecast") then
+			return h("Cast", self, m, old_fn, ...)
+		elseif m == "FireServer" and typeof(self) == "Instance" and self.ClassName == "RemoteEvent" then
+			return h("Remote", self, m, old_fn, ...)
+		end
+		return old_fn(self, ...)
+	end)
+
+	if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
+		local ok, err = pcall(function()
+			slot.OldNC = hookmetamethod(game, "__namecall", nc_hook)
+		end)
+		if ok and typeof(slot.OldNC) == "function" then
+			slot.Installed, S.SilentHooked, S.SilentHookMsg = true, true, "Hooked"
+			return
+		end
+		S.SilentHookMsg = "Err: " .. tostring(err):sub(1, 24)
+	elseif typeof(getrawmetatable) == "function" and typeof(setreadonly) == "function" and typeof(getnamecallmethod) == "function" then
+		local ok = pcall(function()
+			local mt = getrawmetatable(game)
+			slot.OldNC = mt.__namecall
+			setreadonly(mt, false)
+			mt.__namecall = nc_hook
+			setreadonly(mt, true)
+		end)
+		if ok and typeof(slot.OldNC) == "function" then slot.Installed, S.SilentHooked, S.SilentHookMsg = true, true, "Hooked (MT)"; return end
+		S.SilentHookMsg = "MT Locked"
+	else
+		S.SilentHookMsg = "No hookmetamethod"
+	end
+end
+
+local function hide_silent_visuals()
+	SilentD.FOVOut.Visible, SilentD.FOV.Visible, SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false, false, false
+end
+
+local function update_silent()
+	local cam = Workspace.CurrentCamera
+	local sc = CFG.Silent
+	if not sc.Enabled or not cam then
+		S.SilentTgt = nil; hide_silent_visuals(); return
+	end
+	local ctr = silent_origin(cam)
+	local sf = sc.ShowFOV
+	SilentD.FOVOut.Visible, SilentD.FOV.Visible = sf, sf
+	if sf then
+		SilentD.FOVOut.Position, SilentD.FOVOut.Radius = ctr, sc.FOV
+		SilentD.FOV.Position, SilentD.FOV.Radius, SilentD.FOV.Color = ctr, sc.FOV, sc.FOVColor
+	end
+
+	local tgt = find_silent_tgt(false)
+	S.SilentTgt = tgt
+	if tgt and tgt.Part and sc.ShowTarget then
+		local pos = resolve_silent_pos(cam.CFrame.Position, tgt.Part, tgt.Hum)
+		local sp = cam:WorldToViewportPoint(pos)
+		if sp.Z > 0.2 then
+			local pt = Vector2.new(sp.X, sp.Y)
+			SilentD.DotOut.Position, SilentD.DotOut.Visible = pt, true
+			SilentD.Dot.Position, SilentD.Dot.Color, SilentD.Dot.Visible = pt, sc.FOVColor, true
+		else
+			SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false
+		end
+	else
+		SilentD.DotOut.Visible, SilentD.Dot.Visible = false, false
+	end
+end
+
+local function cleanup_silent()
+	local g = getgenv and getgenv() or _G
+	if g._OcelSilentSlot then g._OcelSilentSlot.Handler = nil end
+	for _, d in pairs(SilentD) do pcall(function() d:Remove() end) end
 end
 
 -- Multi-Style Chams (Players, Self, Arms, Weapon)
@@ -1543,6 +1872,25 @@ local function build_ui(destroy_fn)
 	tog(apg, "Target Snapline", function() return CFG.Aim.ShowSnapline end, function(v) CFG.Aim.ShowSnapline = v end)
 	col_row(apg, "FOV Color", function() return CFG.Aim.FOVColor end, function(c) CFG.Aim.FOVColor = c end)
 
+	hdr_lbl(apg, "Silent Aim (" .. S.SilentHookMsg .. ")")
+	tog(apg, "Enable Silent Aim", function() return CFG.Silent.Enabled end, function(v) CFG.Silent.Enabled = v end)
+	sel(apg, "Silent Method", { "Hybrid", "Raycast", "Remote" }, function() return CFG.Silent.Method end, function(v) CFG.Silent.Method = v end)
+	sel(apg, "Silent Bone", { "Head", "UpperTorso", "HumanoidRootPart", "Closest", "Dynamic", "Random" }, function() return CFG.Silent.TargetPart end, function(v) CFG.Silent.TargetPart = v end)
+	sel(apg, "Silent Priority", { "Crosshair", "Distance", "Lowest HP", "Hybrid" }, function() return CFG.Silent.Priority end, function(v) CFG.Silent.Priority = v end)
+	sld(apg, "Hit Chance", 5, 100, 5, "%", function() return CFG.Silent.HitChance end, function(v) CFG.Silent.HitChance = v end)
+	sld(apg, "Silent FOV", 25, 450, 5, "px", function() return CFG.Silent.FOV end, function(v) CFG.Silent.FOV = v end)
+	sld(apg, "Silent Max Dist", 50, 2000, 25, "m", function() return CFG.Silent.MaxDistance end, function(v) CFG.Silent.MaxDistance = v end)
+	tog(apg, "Silent Wall Check", function() return CFG.Silent.WallCheck end, function(v) CFG.Silent.WallCheck = v end)
+	tog(apg, "Magic Bullet (Wallbang)", function() return CFG.Silent.MagicBullet end, function(v) CFG.Silent.MagicBullet = v end)
+	tog(apg, "Silent Team Check", function() return CFG.Silent.TeamCheck end, function(v) CFG.Silent.TeamCheck = v end)
+	tog(apg, "Ignore Hearse Hidden", function() return CFG.Silent.IgnoreHearseHidden end, function(v) CFG.Silent.IgnoreHearseHidden = v end)
+	tog(apg, "Target Border Bots (NPC)", function() return CFG.Silent.TargetNPCs end, function(v) CFG.Silent.TargetNPCs = v end)
+	tog(apg, "Silent Prediction", function() return CFG.Silent.Prediction end, function(v) CFG.Silent.Prediction = v end)
+	sld(apg, "Silent Pred Lead", 0.02, 0.30, 0.02, "s", function() return CFG.Silent.PredictionScale end, function(v) CFG.Silent.PredictionScale = v end)
+	tog(apg, "Show Silent FOV", function() return CFG.Silent.ShowFOV end, function(v) CFG.Silent.ShowFOV = v end)
+	tog(apg, "Show Silent Target Dot", function() return CFG.Silent.ShowTarget end, function(v) CFG.Silent.ShowTarget = v end)
+	col_row(apg, "Silent FOV Color", function() return CFG.Silent.FOVColor end, function(c) CFG.Silent.FOVColor = c end)
+
 	local epg = mk_pg("ESP")
 	hdr_lbl(epg, "Master & Filters")
 	tog(epg, "Enable ESP", function() return CFG.ESP.Enabled end, function(v) CFG.ESP.Enabled = v end)
@@ -1636,6 +1984,7 @@ local function destroy_all()
 	for pl in pairs(ESP_E) do del_esp(pl) end
 	for mdl in pairs(NPC_E) do del_npc_esp(mdl) end
 	for _, d in pairs(AimD) do pcall(function() d:Remove() end) end
+	cleanup_silent()
 	cleanup_crosshair()
 	cleanup_chams()
 	if UI.Gui then pcall(function() UI.Gui:Destroy() end) end
@@ -1664,7 +2013,8 @@ end))
 tc(UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then S.FireHold = false end end))
 tc(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(upd_scale))
 
+install_silent_hooks()
 build_ui(destroy_all)
 RunService:BindToRenderStep("OcelHubAimPre", Enum.RenderPriority.First.Value + 1, function(dt) if not S.Destroyed then update_aim_pre(dt) end end)
 RunService:BindToRenderStep("OcelHubAim", Enum.RenderPriority.Camera.Value + 10, function() if not S.Destroyed then update_aim_post() end end)
-tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk) end end))
+tc(RunService.RenderStepped:Connect(function() if not S.Destroyed then local clk = os.clock(); update_esp(); update_chams(clk); update_crosshair(clk); update_silent() end end))
